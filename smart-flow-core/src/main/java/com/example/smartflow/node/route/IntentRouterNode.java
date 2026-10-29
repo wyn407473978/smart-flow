@@ -50,8 +50,8 @@ public abstract class IntentRouterNode extends AbstractNode {
             判断要点：
             1. 有"待回答的问题"时，先判断用户是不是在回答它：简短的肯定或否定（"是的""对""好""不是"），
                或者正好提供了它要的信息，通常就是在回答它。此时 action 填 CONTINUE，intent 填提出这个问题的模块。
-            2. 进行中的任务正在等待某些信息，用户这句话恰好提供了这些信息（哪怕只有一个词），
-               action 填 CONTINUE，intent 填这个任务对应的模块。
+            2. 进行中的任务正在等待某些信息或者在等用户确认，用户这句话恰好提供了这些信息、做了确认、
+               或者要修改已填的信息（哪怕只有一个词），action 填 CONTINUE，intent 填这个任务对应的模块。
             3. 只有用户明确表达放弃时才判定为 CANCEL，单纯问别的事情是 DIGRESS。
             4. 拿不准属于哪个模块时，intent 选 %s。
 
@@ -110,7 +110,8 @@ public abstract class IntentRouterNode extends AbstractNode {
         prompts.put("route · system", systemPrompt());
         prompts.put("route · user", USER_TEMPLATE.formatted(
                 "来自\"{模块名}\"（{意图编码}）：{追问原话}　　← 上一轮没有节点追问时是：（无）",
-                "{任务名（任务类型）}\n当前阶段：{阶段说明}\n已收集信息：{槽位}　　← 没有进行中的任务时这三行是：（无）",
+                "{任务名（任务类型）}\n当前阶段：{阶段说明}\n已收集信息：{槽位}\n正在等用户回答：{例如确认节点在等确认}"
+                        + "　　← 第四行只在任务节点等用户回答时出现；没有进行中的任务时这几行是：（无）",
                 "\n{早期对话摘要，没有则不出现}\n",
                 "{最近 6 条对话}", "{用户本轮消息}"));
         return prompts;
@@ -177,9 +178,12 @@ public abstract class IntentRouterNode extends AbstractNode {
                 catalog.taskName(p.getTaskType()), p.getTaskType(), p.getAwaiting())).orElse("（无）");
         String taskDesc = task.map(t -> {
             String stage = catalog.stageDescription(t.getCurrentNode());
-            return "%s（%s）%n当前阶段：%s%n已收集信息：%s".formatted(
+            String desc = "%s（%s）%n当前阶段：%s%n已收集信息：%s".formatted(
                     catalog.taskName(t.getTaskType()), t.getTaskType(),
                     stage.isBlank() ? t.getCurrentNode() : stage, t.getSlots());
+            // 任务节点明确在等用户回答（例如确认节点在等"确认 / 修改 / 取消"）
+            return t.getAwaiting() == null || t.getAwaiting().isBlank() ? desc
+                    : desc + "%n正在等用户回答：%s".formatted(t.getAwaiting());
         }).orElse("（无）");
 
         String userContent = USER_TEMPLATE.formatted(pendingDesc, taskDesc, memoryBlock(state),
