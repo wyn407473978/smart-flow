@@ -603,6 +603,11 @@ public abstract class AbstractNode implements NodeAction<FlowState> {
         return SystemMessage.from(text);
     }
 
+    /** 复制一份任务栈准备修改：推进阶段、完成或取消任务，改完调用 {@link TaskStackEdit#writeTo} 写回 */
+    protected static TaskStackEdit editTasks(FlowState state) {
+        return TaskStackEdit.of(state);
+    }
+
     /** 新建一个可变的状态更新 Map（Map.of 不允许 null 值，容易踩坑） */
     protected static Map<String, Object> updates() {
         return new HashMap<>();
