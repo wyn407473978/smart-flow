@@ -1,8 +1,22 @@
-# smart-flow：智慧民生多节点对话工作流（最小闭环）
+# smart-flow：多节点对话工作流 Base
 
 Spring Boot 3.5 + LangChain4j 1.19 + LangGraph4j 1.8（LTS）+ MyBatis 3 + PostgreSQL。
 
-## 已实现
+框架和业务分开放在不同模块里：新工作流依赖 `smart-flow-core`（需要 HTTP 接口和测试页再加 `smart-flow-web`），
+只写自己的节点和工具，引擎、路由、记忆、trace 都不用改。`smart-flow-demo` 是一个完整的示例工作流（智慧民生）。
+
+## 模块
+
+| 模块 | 内容 | 业务工程是否依赖 |
+|---|---|---|
+| `smart-flow-core` | 引擎、节点基类 `AbstractNode`、根路由、路由目录、记忆、trace、数据访问（MyBatis）、建表脚本 | 必须 |
+| `smart-flow-web` | SSE 对话接口、调试查询接口（`/api/**`）、测试页面 | 需要 HTTP 接口时 |
+| `smart-flow-demo` | 示例工作流：智慧民生（下表的节点），可直接运行 | 不依赖，照着写 |
+
+core 和 web 都是 Spring Boot 自动配置（`FlowCoreAutoConfiguration`、`FlowWebAutoConfiguration`），
+业务工程加上依赖就生效，`@SpringBootApplication` 只需要扫描自己的包。
+
+## 示例工作流（smart-flow-demo）
 
 | 节点 | ID | 类型 | 说明 |
 |---|---|---|---|
@@ -17,20 +31,21 @@ Spring Boot 3.5 + LangChain4j 1.19 + LangGraph4j 1.8（LTS）+ MyBatis 3 + Postg
 ## 快速开始
 
 ```bash
-# 1. 建库（表会在启动时自动创建，脚本在 src/main/resources/db/schema.sql）
+# 1. 建库（表会在启动时自动创建，脚本是 smart-flow-core 里的 db/smart-flow-schema.sql）
 createdb smart_flow
 
-# 2. 配置模型 Key（默认走阿里云百炼的 OpenAI 兼容端点，可在 application.yml 改成任意兼容端点）
-export DASHSCOPE_API_KEY=sk-xxx
+# 2. 配置模型 Key（端点在 smart-flow-demo 的 application.yml 里，可以改成任意 OpenAI 协议兼容端点）
+export DEEPSEEK_API_KEY=sk-xxx
 
-# 3. 启动
-mvn spring-boot:run
+# 3. 编译安装框架模块，再启动示例
+mvn install -DskipTests
+mvn -pl smart-flow-demo spring-boot:run
 
 # 4. 打开测试页面
 open http://localhost:8080/
 ```
 
-数据库地址、账号、模型名都在 `application.yml` 里改。
+数据库地址、账号、模型名、助手人设（`flow.assistant`）都在 `smart-flow-demo/src/main/resources/application.yml` 里改。
 
 非流式接口（方便 curl 和自动化评测）：
 
@@ -44,15 +59,26 @@ curl -s localhost:8080/api/chat -H 'Content-Type: application/json' \
 ## 目录结构
 
 ```
-config/      模型、图定义、配置项
-flow/        图状态 FlowState、任务帧 TaskFrame、路由结果、常量
-node/        AbstractNode 基类 + 各节点
-engine/      WorkflowEngine（每轮入口）、轮次上下文、推送事件
-session/     会话状态、消息存取（SessionRepository → SessionMapper）
-trace/       轮次 / 节点 / 模型调用 / 工具调用 记录；ChatModelListener（TraceRepository → TraceMapper）
-web/         SSE 接口、调试查询接口
-resources/static/index.html   测试页面
-resources/mapper/*.xml        MyBatis SQL（Repository 只做 JSON 序列化等整理，SQL 都在这里）
+smart-flow-core/src/main/java/com/example/smartflow/
+  autoconfigure/  FlowCoreAutoConfiguration（注册框架 Bean 和 Mapper）
+  config/         配置项 FlowProperties（flow.*）、模型、图定义
+  flow/           图状态 FlowState、任务帧 TaskFrame、路由结果、框架常量 FlowNames
+  node/           AbstractNode 基类、根路由 RouterNode、NodeType、HistoryPolicy；route/ 路由声明与目录
+  engine/         WorkflowEngine（每轮入口）、轮次上下文、推送事件
+  memory/         滚动摘要、长期记忆（MemoryRepository → MemoryMapper）
+  session/        会话状态、消息存取（SessionRepository → SessionMapper）
+  trace/          轮次 / 节点 / 模型调用 / 工具调用 记录；ChatModelListener（TraceRepository → TraceMapper）
+  tool/           工具接口 FlowTool
+smart-flow-core/src/main/resources/
+  com/example/smartflow/**/*Mapper.xml   MyBatis SQL，和 Mapper 接口同路径
+  db/smart-flow-schema.sql               建表脚本
+
+smart-flow-web/   web/ 下是 SSE 接口、调试查询接口；resources/static/index.html 是测试页面
+
+smart-flow-demo/src/main/java/com/example/smartflow/demo/
+  SmartFlowApplication、MinshengNames（节点 ID、任务类型）
+  node/  闲聊、业务查询、活动创建各节点
+  tool/  演示工具（天气、个人信息）
 ```
 
 ## 一轮对话怎么跑
@@ -207,8 +233,10 @@ public HistoryPolicy historyPolicy() {
 mvn test
 ```
 
-- `CollectTargetNodeTest`：槽位校验 / 合并逻辑的纯单元测试
-- `WorkflowScenarioTest`：多轮场景测试，用按脚本返回的 stub 模型 + 内存存储，不需要数据库和真实模型。覆盖开始任务、补充、插话、非法 JSON 重试、同轮流转 C2、取消、路由兜底
+- `FrameworkResourcesTest`（core）：Mapper XML、自动配置注册文件、建表脚本都打进了 jar
+- `FlowPropertiesBindingTest`（core）：配置 record 都能被 Spring Boot 绑定
+- `CollectTargetNodeTest`（demo）：槽位校验 / 合并逻辑的纯单元测试
+- `WorkflowScenarioTest`（demo）：多轮场景测试，用按脚本返回的 stub 模型 + 内存存储，不需要数据库和真实模型。覆盖开始任务、补充、插话、非法 JSON 重试、同轮流转 C2、取消、路由兜底
 
 这两类测试就是后续 Evals 的起点：场景脚本保留，把 stub 换成真实模型 + LLM 扮演用户，就是端到端评测。
 
