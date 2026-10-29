@@ -640,7 +640,7 @@ class WorkflowScenarioTest {
         public void doChat(ChatRequest request, StreamingChatResponseHandler handler) {
             new Thread(() -> {
                 String sysText = systemText(request);
-                String who = sysText.contains("业务查询模块") ? "biz" : sysText.contains("正在帮用户创建活动") ? "ask" : "chat";
+                String who = sysText.contains("业务查询模块") ? "biz" : sysText.contains("当前步骤：") ? "ask" : "chat";
                 systemPrompts.computeIfAbsent(who, k -> new java.util.concurrent.CopyOnWriteArrayList<>()).add(sysText);
                 if (sysText.contains("业务查询模块")) {
                     bizPrompts.add(sysText);
