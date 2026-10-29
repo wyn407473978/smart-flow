@@ -15,8 +15,10 @@ public final class MinshengNames {
     public static final String CHAT = "chat";
     /** C1：活动创建 - 收集目标人群 */
     public static final String COLLECT_TARGET = "collect_target";
-    /** C2：活动创建 - 模版确认 */
+    /** C2：活动创建 - 确认活动模版和时间 */
     public static final String CHOOSE_TEMPLATE = "choose_template";
+    /** C3：活动创建 - 确认后创建活动 */
+    public static final String SUBMIT_ACTIVITY = "submit_activity";
 
     // ---- 任务类型 ----
     public static final String TASK_ACTIVITY_CREATE = "ACTIVITY_CREATE";

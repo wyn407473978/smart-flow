@@ -6,6 +6,7 @@ import com.example.smartflow.flow.FlowNames;
 import com.example.smartflow.flow.FlowState;
 import com.example.smartflow.flow.HistoryMessage;
 import com.example.smartflow.flow.MemoryFact;
+import com.example.smartflow.flow.TaskFrame;
 import com.example.smartflow.flow.ToolFact;
 import com.example.smartflow.memory.ConversationSummarizer;
 import com.example.smartflow.memory.LongTermMemoryExtractor;
@@ -16,11 +17,13 @@ import com.example.smartflow.llm.ModelRegistry;
 import com.example.smartflow.node.AbstractNode;
 import com.example.smartflow.demo.node.BizQueryNode;
 import com.example.smartflow.demo.node.ChatNode;
-import com.example.smartflow.demo.node.ChooseTemplatePlaceholderNode;
+import com.example.smartflow.demo.node.ChooseTemplateNode;
 import com.example.smartflow.demo.node.CollectTargetNode;
+import com.example.smartflow.demo.node.SubmitActivityNode;
 import com.example.smartflow.node.NodeScope;
 import com.example.smartflow.node.NodeSupport;
 import com.example.smartflow.node.NodeType;
+import com.example.smartflow.node.confirm.ConfirmNode.CommitResult;
 import com.example.smartflow.node.RouterNode;
 import com.example.smartflow.node.route.RouteCatalog;
 import com.example.smartflow.node.route.RouteSpec;
@@ -55,6 +58,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -72,6 +76,8 @@ class WorkflowScenarioTest {
 
     private final Deque<String> routerScript = new ArrayDeque<>();
     private final Deque<String> extractScript = new ArrayDeque<>();
+    /** 确认节点判断用户回复的模型输出脚本 */
+    private final Deque<String> confirmScript = new ArrayDeque<>();
     private final List<String> llmCalls = new ArrayList<>();
     private final FakeSessions sessions = new FakeSessions();
     private final FakeMemoryRepository memoryRepo = new FakeMemoryRepository();
@@ -99,6 +105,8 @@ class WorkflowScenarioTest {
     private final FakeTrace trace = new FakeTrace();
     private final TurnRegistry turns = new TurnRegistry();
     private NodeSupport support;
+    private CollectTargetNode collectTarget;
+    private ChooseTemplateNode chooseTemplate;
     /** 和 Spring 一样：节点列表就是"注册了哪些节点"，路由目录和图都从它生成 */
     private final List<AbstractNode> nodes = new ArrayList<>();
     private final RouteCatalog catalog = new RouteCatalog(() -> nodes);
@@ -120,8 +128,10 @@ class WorkflowScenarioTest {
         props = new FlowProperties(props.model(), memoryConfig, props.sse());
         support = new NodeSupport(models, trace, turns, MAPPER, props);
         nodes.clear();
+        collectTarget = new CollectTargetNode(support);
+        chooseTemplate = new ChooseTemplateNode(support);
         nodes.addAll(List.of(new RouterNode(support, catalog), new ChatNode(support, catalog),
-                new CollectTargetNode(support), new ChooseTemplatePlaceholderNode(support),
+                collectTarget, chooseTemplate, new SubmitActivityNode(support, collectTarget, chooseTemplate),
                 new BizQueryNode(support, catalog, new WeatherTool(MAPPER), new UserInfoTool(MAPPER))));
         catalog.refresh();
         rebuild();
@@ -172,7 +182,7 @@ class WorkflowScenarioTest {
         assertEquals(true, complaint.get("inPrompt"));
         assertEquals("ONE_SHOT", complaint.get("kind"));
         assertTrue(children.stream().allMatch(c -> Boolean.TRUE.equals(c.get("inPrompt"))), "所有子节点都应出现在提示词中");
-        assertEquals(List.of("choose_template"), view.get("unattached"));
+        assertEquals(List.of("choose_template", "submit_activity"), view.get("unattached"), "任务的中间阶段不挂在路由下");
 
         // 任务进行中投诉 → 去新节点，算插话，回答完提示继续任务
         routerScript.add("{\"action\":\"START\",\"intent\":\"ACTIVITY_CREATE\",\"reason\":\"\"}");
@@ -537,6 +547,7 @@ class WorkflowScenarioTest {
         routerScript.add("not json");
         routerScript.add("{\"action\":\"CONTINUE\",\"intent\":\"ACTIVITY_CREATE\",\"reason\":\"补充区域\"}");
         extractScript.add("{\"region\":\"阳光社区\"}");
+        extractScript.add("{}");   // 同一轮进入 C2，C2 从这句话里没抽到模版和时间，追问
         var done = turn("s1", "阳光社区", List.of("router", "collect_target", "choose_template"), "choose_template");
         assertTrue(done.reply().contains("60 岁及以上、女性、阳光社区"), "确认文案");
         assertEquals(60, done.state().getTaskStack().get(0).getSlots().get("ageMin"));
@@ -552,6 +563,130 @@ class WorkflowScenarioTest {
         routerScript.add("{\"action\":\"CANCEL\",\"intent\":\"ACTIVITY_CREATE\",\"reason\":\"不办了\"}");
         var r = turn("s2", "算了不办了", List.of("router"), null);
         assertTrue(r.reply().contains("已为你取消"), "取消回复");
+    }
+
+    // =====================================================================
+    // 活动创建全流程：C1 目标人群 → C2 模版和时间 → C3 确认后创建
+    // =====================================================================
+
+    private static final String CONTINUE_ACTIVITY = "{\"action\":\"CONTINUE\",\"intent\":\"ACTIVITY_CREATE\",\"reason\":\"\"}";
+
+    /** 走到确认这一步：一句话说全目标人群（C1 收齐后同一轮进入 C2 追问），再补模版和时间（C2 收齐后进入 C3 展示确认内容） */
+    private void activityUntilConfirm(String sid) {
+        routerScript.add("{\"action\":\"START\",\"intent\":\"ACTIVITY_CREATE\",\"reason\":\"\"}");
+        extractScript.add("{\"ageMin\":60,\"gender\":\"FEMALE\",\"region\":\"阳光社区\"}");
+        extractScript.add("{}");
+        var r1 = turn(sid, "帮我办个活动，面向阳光社区60岁以上的女性",
+                List.of("router", "collect_target", "choose_template"), "choose_template");
+        assertTrue(r1.reply().startsWith("好的，活动的目标人群确认为：60 岁及以上、女性、阳光社区。"), r1.reply());
+
+        routerScript.add(CONTINUE_ACTIVITY);
+        extractScript.add("{\"template\":\"敬老关爱\",\"activityTime\":\"下周六上午\"}");
+        var r2 = turn(sid, "敬老关爱，下周六上午", List.of("router", "choose_template", "submit_activity"), "submit_activity");
+        assertTrue(r2.reply().startsWith("好的，活动模版定为「敬老关爱」，时间是下周六上午。"), r2.reply());
+        assertTrue(r2.reply().contains("请确认以下信息：\n- 目标人群：60 岁及以上、女性、阳光社区\n- 活动模版：敬老关爱\n- 活动时间：下周六上午"),
+                r2.reply());
+        TaskFrame task = r2.state().getTaskStack().get(0);
+        assertEquals("ELDERLY_CARE", task.getSlots().get("template"), "枚举存编码");
+        assertTrue(task.getAwaiting() != null, "确认节点在等用户确认");
+    }
+
+    @Test
+    void createActivityEndToEnd() {
+        activityUntilConfirm("f1");
+
+        routerScript.add(CONTINUE_ACTIVITY);
+        var r = turn("f1", "确认！", List.of("router", "submit_activity"), null);
+        assertTrue(last(routerInputs).contains("正在等用户回答：请用户确认是否创建活动"), "路由能看到任务在等确认: " + last(routerInputs));
+        assertTrue(r.reply().startsWith("活动已创建成功，编号 ACT-"), r.reply());
+        assertTrue(r.state().getTaskStack().isEmpty(), "任务完成后出栈");
+        assertFalse(llmCalls.contains("submit_activity/confirm_decision"), "明确的确认不调用模型");
+    }
+
+    @Test
+    void modifyAtConfirmationGoesBackAndReconfirms() {
+        activityUntilConfirm("f2");
+
+        routerScript.add(CONTINUE_ACTIVITY);
+        confirmScript.add("{\"decision\":\"MODIFY\",\"reason\":\"改性别\"}");
+        extractScript.add("{\"gender\":\"MALE\"}");   // 回到 C1，抽到修改
+        extractScript.add("{}");                      // C2 没有变化，直接往后走
+        var r = turn("f2", "性别改成男性",
+                List.of("router", "submit_activity", "collect_target", "choose_template", "submit_activity"), "submit_activity");
+        assertTrue(r.reply().startsWith("好的，活动的目标人群确认为：60 岁及以上、男性、阳光社区。"), r.reply());
+        assertTrue(r.reply().contains("- 目标人群：60 岁及以上、男性、阳光社区"), "重新展示修改后的确认内容: " + r.reply());
+        assertFalse(r.reply().contains("活动模版定为"), "C2 没有变化，不重复确认: " + r.reply());
+
+        routerScript.add(CONTINUE_ACTIVITY);
+        var done = turn("f2", "好的", List.of("router", "submit_activity"), null);
+        assertTrue(done.reply().startsWith("活动已创建成功"), done.reply());
+    }
+
+    @Test
+    void confirmationNeedsAClearAnswer() {
+        activityUntilConfirm("f3");
+
+        // 想改但没说改成什么：问改哪一项，仍然在等确认
+        routerScript.add(CONTINUE_ACTIVITY);
+        confirmScript.add("{\"decision\":\"ASK_MODIFY\",\"reason\":\"\"}");
+        var ask = turn("f3", "有个地方不对", List.of("router", "submit_activity"), "submit_activity");
+        assertEquals("好的，你想改哪一项？直接告诉我新的内容就行。", ask.reply());
+
+        // 插话后回来说"继续"：不能当成确认，重新展示确认内容
+        routerScript.add("{\"action\":\"DIGRESS\",\"intent\":\"CHAT\",\"reason\":\"闲聊\"}");
+        turn("f3", "你是谁", List.of("router", "chat"), "submit_activity");
+        routerScript.add(CONTINUE_ACTIVITY);
+        confirmScript.add("{\"decision\":\"UNCLEAR\",\"reason\":\"只说了继续\"}");
+        var again = turn("f3", "继续", List.of("router", "submit_activity"), "submit_activity");
+        assertTrue(again.reply().startsWith("请确认以下信息："), again.reply());
+
+        // 判断输出两次都不是合法 JSON：按判断不了处理，不会误提交
+        routerScript.add(CONTINUE_ACTIVITY);
+        confirmScript.add("bad");
+        confirmScript.add("still bad");
+        var bad = turn("f3", "嗯嗯", List.of("router", "submit_activity"), "submit_activity");
+        assertTrue(bad.reply().startsWith("请确认以下信息："), bad.reply());
+        assertEquals(1, bad.state().getTaskStack().size(), "还没有创建");
+    }
+
+    @Test
+    void cancelAtConfirmation() {
+        activityUntilConfirm("f4");
+
+        routerScript.add("{\"action\":\"CANCEL\",\"intent\":\"ACTIVITY_CREATE\",\"reason\":\"不办了\"}");
+        var r = turn("f4", "算了，不办了", List.of("router"), null);
+        assertTrue(r.reply().contains("已为你取消当前的活动创建"), r.reply());
+    }
+
+    /** 写操作失败：任务保持待确认，用户重试时用的是同一个幂等键 */
+    @Test
+    void commitFailureKeepsTaskForRetryWithSameKey() throws Exception {
+        List<String> keys = new ArrayList<>();
+        AtomicInteger calls = new AtomicInteger();
+        int idx = nodes.indexOf(nodes.stream().filter(n -> n.id().equals("submit_activity")).findFirst().orElseThrow());
+        nodes.set(idx, new SubmitActivityNode(support, collectTarget, chooseTemplate) {
+            @Override
+            protected CommitResult commit(TaskFrame task, String idempotencyKey) {
+                keys.add(idempotencyKey);
+                if (calls.incrementAndGet() == 1) {
+                    throw new IllegalStateException("业务接口超时");
+                }
+                return CommitResult.ok("活动已创建成功。");
+            }
+        });
+        catalog.refresh();
+        rebuild();
+
+        activityUntilConfirm("f5");
+        routerScript.add(CONTINUE_ACTIVITY);
+        var failed = turn("f5", "确认", List.of("router", "submit_activity"), "submit_activity");
+        assertEquals("抱歉，创建活动时系统出了点问题。你可以稍后回复「确认」重试，或者说「取消」。", failed.reply());
+
+        routerScript.add(CONTINUE_ACTIVITY);
+        var ok = turn("f5", "确认", List.of("router", "submit_activity"), null);
+        assertEquals("活动已创建成功。", ok.reply());
+        assertEquals(2, keys.size());
+        assertEquals(keys.get(0), keys.get(1), "重试时幂等键不变");
     }
 
     @Test
@@ -612,6 +747,7 @@ class WorkflowScenarioTest {
             }
             String out = sys.contains("路由模块") ? routerScript.pop()
                     : sys.contains("信息抽取模块") ? extractScript.pop()
+                    : sys.contains("确认判断模块") ? confirmScript.pop()
                     : sys.contains("对话摘要模块") ? (summaryScript.isEmpty() ? "" : summaryScript.pop())
                     : sys.contains("长期记忆模块") ? (memoryScript.isEmpty() ? "{\"upserts\":[],\"deletes\":[]}" : memoryScript.pop())
                     : "{}";
