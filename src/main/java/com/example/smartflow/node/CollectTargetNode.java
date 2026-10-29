@@ -3,6 +3,7 @@ package com.example.smartflow.node;
 import com.example.smartflow.flow.FlowNames;
 import com.example.smartflow.flow.FlowState;
 import com.example.smartflow.flow.TaskFrame;
+import com.example.smartflow.node.route.RouteSpec;
 import dev.langchain4j.data.message.ChatMessage;
 import dev.langchain4j.data.message.UserMessage;
 import org.springframework.stereotype.Component;
@@ -11,6 +12,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 /**
  * C1：活动创建 - 收集目标人群（年龄、性别、区域）。
@@ -77,6 +79,20 @@ public class CollectTargetNode extends AbstractNode {
         return NodeType.SLOT_FILLING;
     }
 
+    /** 活动创建任务的入口：路由识别到"活动创建"时开启任务，从这个节点开始 */
+    @Override
+    public Optional<RouteSpec> routeSpec() {
+        return Optional.of(RouteSpec.taskEntry(FlowNames.ROUTER, FlowNames.TASK_ACTIVITY_CREATE, "活动创建",
+                "用户想创建、发起、策划一个社区/民生活动",
+                List.of("我想办一个活动", "帮我策划一场敬老活动", "社区要搞个亲子活动"),
+                10));
+    }
+
+    @Override
+    public String stageDescription() {
+        return "收集活动的目标人群（年龄范围、性别、目标区域或社区）";
+    }
+
     @Override
     protected Map<String, Object> execute(FlowState state, NodeScope scope) throws Exception {
         List<TaskFrame> stack = new ArrayList<>();
@@ -103,8 +119,10 @@ public class CollectTargetNode extends AbstractNode {
         List<String> missing = missingSlots(task.getSlots());
         Map<String, Object> updates = updates();
         if (missing.isEmpty() && errors.isEmpty()) {
+            // 任务推进到 C2，并在本轮内直接执行 C2
             task.setCurrentNode(FlowNames.CHOOSE_TEMPLATE);
             updates.put(FlowState.REPLIES, emitText(scope, "好的，活动的目标人群确认为：" + describe(task.getSlots()) + "。"));
+            goTo(updates, FlowNames.CHOOSE_TEMPLATE);
         } else {
             updates.put(FlowState.REPLIES, ask(state, scope, task.getSlots(), missing, errors, changed));
         }

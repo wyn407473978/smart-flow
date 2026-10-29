@@ -2,8 +2,10 @@ package com.example.smartflow.node;
 
 import com.example.smartflow.engine.TurnContext;
 import com.example.smartflow.engine.TurnEvent;
+import com.example.smartflow.flow.FlowNames;
 import com.example.smartflow.flow.FlowState;
 import com.example.smartflow.flow.HistoryMessage;
+import com.example.smartflow.node.route.RouteSpec;
 import com.example.smartflow.trace.TraceKeys;
 import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.data.message.ChatMessage;
@@ -24,6 +26,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
@@ -57,6 +60,24 @@ public abstract class AbstractNode implements NodeAction<FlowState> {
     public abstract NodeType type();
 
     /**
+     * 声明自己挂在哪个路由节点下、在什么情况下应该被路由到。
+     * 返回空表示不能被路由直接到达（例如任务的第二、第三阶段，只能由上一阶段推进过来）。
+     * <p>
+     * 父路由节点的提示词由所有子节点的声明拼成，所以新增子节点时父节点不用改。
+     */
+    public Optional<RouteSpec> routeSpec() {
+        return Optional.empty();
+    }
+
+    /**
+     * 任务停留在本节点时，告诉路由模型"正在等用户提供什么"，
+     * 帮助它判断用户的简短回答（例如"女性"）是在继续任务。只有任务阶段节点需要覆盖。
+     */
+    public String stageDescription() {
+        return "";
+    }
+
+    /**
      * 节点业务逻辑。
      *
      * @return 对状态的更新（只放需要改变的 key）
@@ -79,10 +100,10 @@ public abstract class AbstractNode implements NodeAction<FlowState> {
         turn.emit(TurnEvent.of("node_start", "node", id(), "type", type().name(), "seq", seq));
 
         try {
-            Map<String, Object> updates = execute(state, new NodeScope(turn, execId, id()));
-            if (updates == null) {
-                updates = Map.of();
-            }
+            Map<String, Object> result = execute(state, new NodeScope(turn, execId, id()));
+            Map<String, Object> updates = result == null ? new HashMap<>() : new HashMap<>(result);
+            // 没有指定下一个节点就结束本轮；必须每次都写，否则会沿用上一个节点留下的值
+            updates.putIfAbsent(FlowState.NEXT_NODE, FlowNames.END_TURN);
             long ms = elapsedMs(start);
             support.trace().finishNodeExec(execId, updates, "SUCCESS", null, ms);
             turn.emit(TurnEvent.of("node_end", "node", id(), "status", "SUCCESS", "latencyMs", ms));
@@ -233,6 +254,12 @@ public abstract class AbstractNode implements NodeAction<FlowState> {
     /** 新建一个可变的状态更新 Map（Map.of 不允许 null 值，容易踩坑） */
     protected static Map<String, Object> updates() {
         return new HashMap<>();
+    }
+
+    /** 本节点执行完后，在同一轮内继续执行 nodeId（例如任务从 C1 推进到 C2） */
+    protected static Map<String, Object> goTo(Map<String, Object> updates, String nodeId) {
+        updates.put(FlowState.NEXT_NODE, nodeId);
+        return updates;
     }
 
     /** 只包含一条回复的状态更新 */

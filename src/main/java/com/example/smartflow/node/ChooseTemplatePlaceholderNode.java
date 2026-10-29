@@ -28,6 +28,11 @@ public class ChooseTemplatePlaceholderNode extends AbstractNode {
     }
 
     @Override
+    public String stageDescription() {
+        return "确认活动使用的模版";
+    }
+
+    @Override
     protected Map<String, Object> execute(FlowState state, NodeScope scope) {
         return reply(emitText(scope, "下一步是选择活动模版。（C2 模版确认节点尚未实现，这里是占位回复。）"));
     }

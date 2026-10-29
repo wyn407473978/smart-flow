@@ -5,6 +5,7 @@ import com.example.smartflow.flow.FlowState;
 import com.example.smartflow.flow.HistoryMessage;
 import com.example.smartflow.flow.RouteDecision;
 import com.example.smartflow.flow.TaskFrame;
+import com.example.smartflow.node.route.RouteCatalog;
 import com.example.smartflow.session.SessionRepository;
 import com.example.smartflow.session.SessionRepository.SessionRecord;
 import com.example.smartflow.session.SessionState;
@@ -38,6 +39,7 @@ public class WorkflowEngine {
     private final TraceRepository trace;
     private final TurnRegistry turns;
     private final FlowProperties props;
+    private final RouteCatalog catalog;
 
     /**
      * 会话锁：同一会话同一时间只处理一条消息。
@@ -46,7 +48,8 @@ public class WorkflowEngine {
     private final Map<String, ReentrantLock> sessionLocks = new ConcurrentHashMap<>();
 
     public WorkflowEngine(CompiledGraph<FlowState> graph, SessionRepository sessions, TraceRepository trace,
-                          TurnRegistry turns, FlowProperties props) {
+                          TurnRegistry turns, FlowProperties props, RouteCatalog catalog) {
+        this.catalog = catalog;
         this.graph = graph;
         this.sessions = sessions;
         this.trace = trace;
@@ -165,7 +168,7 @@ public class WorkflowEngine {
         if (route == null || route.action() != RouteDecision.Action.DIGRESS) {
             return Optional.empty();
         }
-        return state.activeTask().map(t -> "对了，刚才的活动创建还没完成，要继续吗？");
+        return state.activeTask().map(t -> "对了，刚才的" + catalog.taskName(t.getTaskType()) + "还没完成，要继续吗？");
     }
 
     private static List<TaskFrame> openTasks(List<TaskFrame> stack) {

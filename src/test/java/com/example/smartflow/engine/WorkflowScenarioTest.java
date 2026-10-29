@@ -2,13 +2,20 @@ package com.example.smartflow.engine;
 
 import com.example.smartflow.config.FlowProperties;
 import com.example.smartflow.config.GraphConfig;
+import com.example.smartflow.flow.FlowNames;
+import com.example.smartflow.flow.FlowState;
 import com.example.smartflow.flow.HistoryMessage;
 import com.example.smartflow.llm.ModelRegistry;
+import com.example.smartflow.node.AbstractNode;
 import com.example.smartflow.node.ChatNode;
 import com.example.smartflow.node.ChooseTemplatePlaceholderNode;
 import com.example.smartflow.node.CollectTargetNode;
+import com.example.smartflow.node.NodeScope;
 import com.example.smartflow.node.NodeSupport;
+import com.example.smartflow.node.NodeType;
 import com.example.smartflow.node.RouterNode;
+import com.example.smartflow.node.route.RouteCatalog;
+import com.example.smartflow.node.route.RouteSpec;
 import com.example.smartflow.session.SessionRepository;
 import com.example.smartflow.session.SessionState;
 import com.example.smartflow.trace.TraceChatModelListener;
@@ -37,6 +44,7 @@ import java.util.Objects;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -53,24 +61,97 @@ class WorkflowScenarioTest {
     private final Deque<String> extractScript = new ArrayDeque<>();
     private final List<String> llmCalls = new ArrayList<>();
     private final FakeSessions sessions = new FakeSessions();
-    private final WorkflowEngine engine;
+    private final List<String> routerPrompts = new ArrayList<>();
+
+    private final FlowProperties props = new FlowProperties(
+            new FlowProperties.Model("http://stub", "stub", "chat", "router", 0.3, 5, false),
+            new FlowProperties.Memory(12), new FlowProperties.Sse(180));
+    private final FakeTrace trace = new FakeTrace();
+    private final TurnRegistry turns = new TurnRegistry();
+    private final NodeSupport support;
+    /** 和 Spring 一样：节点列表就是"注册了哪些节点"，路由目录和图都从它生成 */
+    private final List<AbstractNode> nodes = new ArrayList<>();
+    private final RouteCatalog catalog = new RouteCatalog(() -> nodes);
+    private WorkflowEngine engine;
 
     WorkflowScenarioTest() throws Exception {
-        FlowProperties props = new FlowProperties(
-                new FlowProperties.Model("http://stub", "stub", "chat", "router", 0.3, 5, false),
-                new FlowProperties.Memory(12), new FlowProperties.Sse(180));
-        FakeTrace trace = new FakeTrace();
         TraceChatModelListener listener = new TraceChatModelListener(trace, MAPPER);
         ModelRegistry models = new ModelRegistry(
                 new ScriptedChatModel(List.of(listener)),
                 new ScriptedChatModel(List.of(listener)),
                 new StubStreamingModel(List.of(listener)));
-        TurnRegistry turns = new TurnRegistry();
-        NodeSupport support = new NodeSupport(models, trace, turns, MAPPER, props);
-        var graph = new GraphConfig().workflowGraph(new RouterNode(support), new ChatNode(support),
-                new CollectTargetNode(support), new ChooseTemplatePlaceholderNode(support));
-        engine = new WorkflowEngine(graph, sessions, trace, turns, props);
+        support = new NodeSupport(models, trace, turns, MAPPER, props);
+        nodes.addAll(List.of(new RouterNode(support, catalog), new ChatNode(support, catalog),
+                new CollectTargetNode(support), new ChooseTemplatePlaceholderNode(support)));
+        rebuild();
     }
+
+    private void rebuild() throws Exception {
+        engine = new WorkflowEngine(GraphConfig.build(nodes, catalog), sessions, trace, turns, props, catalog);
+    }
+
+    // =====================================================================
+    // 新增子节点：只写子节点类，不碰 RouterNode
+    // =====================================================================
+
+    /** 模拟以后新增的 B4 节点：投诉建议（一次性节点） */
+    static class ComplaintNode extends AbstractNode {
+        ComplaintNode(NodeSupport support) { super(support); }
+        @Override public String id() { return "complaint"; }
+        @Override public NodeType type() { return NodeType.CHAT; }
+        @Override public Optional<RouteSpec> routeSpec() {
+            return Optional.of(RouteSpec.oneShot(FlowNames.ROUTER, "COMPLAINT", "投诉建议",
+                    "用户要投诉、反映问题或提建议", List.of("楼道灯坏了没人修", "我要投诉物业"), 30));
+        }
+        @Override protected Map<String, Object> execute(FlowState state, NodeScope scope) {
+            return reply(emitText(scope, "已记录你的反馈。"));
+        }
+    }
+
+    @Test
+    void newChildNodeIsPickedUpWithoutChangingRouter() throws Exception {
+        String before = ((RouterNode) nodes.get(0)).systemPrompt();
+        assertFalse(before.contains("COMPLAINT"));
+
+        nodes.add(new ComplaintNode(support));
+        catalog.refresh();
+        rebuild();
+
+        String after = ((RouterNode) nodes.get(0)).systemPrompt();
+        assertTrue(after.contains("- COMPLAINT（投诉建议）：用户要投诉、反映问题或提建议"), after);
+        assertTrue(after.contains("「我要投诉物业」"), after);
+
+        // 任务进行中投诉 → 去新节点，算插话，回答完提示继续任务
+        routerScript.add("{\"action\":\"START\",\"intent\":\"ACTIVITY_CREATE\",\"reason\":\"\"}");
+        extractScript.add("{}");
+        turn("s4", "我想办一个活动", List.of("router", "collect_target"), "collect_target");
+
+        routerScript.add("{\"action\":\"DIGRESS\",\"intent\":\"COMPLAINT\",\"reason\":\"投诉\"}");
+        var r = turn("s4", "对了楼道灯坏了", List.of("router", "complaint"), "collect_target");
+        assertEquals("已记录你的反馈。\n\n对了，刚才的活动创建还没完成，要继续吗？", r.reply());
+        assertTrue(routerPrompts.get(routerPrompts.size() - 1).contains("COMPLAINT"), "真正发给模型的提示词里有新节点");
+    }
+
+    @Test
+    void unknownIntentGoesToFallback() {
+        routerScript.add("{\"action\":\"START\",\"intent\":\"NOT_EXIST\",\"reason\":\"\"}");
+        turn("s5", "随便说点", List.of("router", "chat"), null);
+    }
+
+    @Test
+    void invalidRouteConfigFailsFast() {
+        nodes.add(new ChatNode(support, catalog) {
+            @Override public String id() { return "chat2"; }   // 第二个兜底节点
+        });
+        catalog.refresh();
+        try {
+            catalog.validate();
+            throw new AssertionError("应该校验失败");
+        } catch (IllegalStateException expected) {
+            assertTrue(expected.getMessage().contains("兜底"), expected.getMessage());
+        }
+    }
+
 
     @Test
     void createActivityWithDigression() {
@@ -156,6 +237,9 @@ class WorkflowScenarioTest {
         @Override
         public ChatResponse doChat(ChatRequest request) {
             String sys = systemText(request);
+            if (sys.contains("路由模块")) {
+                routerPrompts.add(sys);
+            }
             String out = sys.contains("路由模块") ? routerScript.pop()
                     : sys.contains("信息抽取模块") ? extractScript.pop() : "{}";
             return ChatResponse.builder().aiMessage(AiMessage.from(out)).tokenUsage(new TokenUsage(10, 5)).build();

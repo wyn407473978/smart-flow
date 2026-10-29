@@ -33,6 +33,11 @@ public class FlowState extends AgentState {
 
     // ---- 本轮产生 ----
     public static final String ROUTE = "route";
+    /**
+     * 当前节点执行完后要去的节点（本轮内）。每个节点执行完都会写这个 key，
+     * 没写的话基类会补成 {@link FlowNames#END_TURN}，所以图里所有节点共用同一个条件边。
+     */
+    public static final String NEXT_NODE = "nextNode";
     /** List&lt;String&gt;，本轮各节点产出的回复片段，按顺序追加 */
     public static final String REPLIES = "replies";
 
@@ -82,6 +87,10 @@ public class FlowState extends AgentState {
 
     public Optional<RouteDecision> route() {
         return value(ROUTE);
+    }
+
+    public String nextNode() {
+        return this.<String>value(NEXT_NODE).orElse(FlowNames.END_TURN);
     }
 
     public List<String> replies() {
