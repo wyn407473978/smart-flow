@@ -1,6 +1,6 @@
-package com.example.smartflow.node;
+package com.example.smartflow.demo.node;
 
-import com.example.smartflow.node.CollectTargetNode.Extraction;
+import com.example.smartflow.demo.node.CollectTargetNode.Extraction;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;

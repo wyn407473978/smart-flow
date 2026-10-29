@@ -1,5 +1,11 @@
-package com.example.smartflow.node;
+package com.example.smartflow.demo.node;
 
+import com.example.smartflow.node.AbstractNode;
+import com.example.smartflow.node.NodeSupport;
+import com.example.smartflow.node.NodeType;
+import com.example.smartflow.node.NodeScope;
+import com.example.smartflow.node.HistoryPolicy;
+import com.example.smartflow.demo.MinshengNames;
 import com.example.smartflow.flow.FlowNames;
 import com.example.smartflow.flow.FlowState;
 import com.example.smartflow.flow.TaskFrame;
@@ -71,7 +77,7 @@ public class CollectTargetNode extends AbstractNode {
 
     @Override
     public String id() {
-        return FlowNames.COLLECT_TARGET;
+        return MinshengNames.COLLECT_TARGET;
     }
 
     @Override
@@ -82,7 +88,7 @@ public class CollectTargetNode extends AbstractNode {
     /** 活动创建任务的入口：路由识别到"活动创建"时开启任务，从这个节点开始 */
     @Override
     public Optional<RouteSpec> routeSpec() {
-        return Optional.of(RouteSpec.taskEntry(FlowNames.ROUTER, FlowNames.TASK_ACTIVITY_CREATE, "活动创建",
+        return Optional.of(RouteSpec.taskEntry(FlowNames.ROUTER, MinshengNames.TASK_ACTIVITY_CREATE, "活动创建",
                 "用户想创建、发起、策划一个社区/民生活动",
                 List.of("我想办一个活动", "帮我策划一场敬老活动", "社区要搞个亲子活动"),
                 10));
@@ -135,9 +141,9 @@ public class CollectTargetNode extends AbstractNode {
         Map<String, Object> updates = updates();
         if (missing.isEmpty() && errors.isEmpty()) {
             // 任务推进到 C2，并在本轮内直接执行 C2
-            task.setCurrentNode(FlowNames.CHOOSE_TEMPLATE);
+            task.setCurrentNode(MinshengNames.CHOOSE_TEMPLATE);
             updates.put(FlowState.REPLIES, emitText(scope, "好的，活动的目标人群确认为：" + describe(task.getSlots()) + "。"));
-            goTo(updates, FlowNames.CHOOSE_TEMPLATE);
+            goTo(updates, MinshengNames.CHOOSE_TEMPLATE);
         } else {
             updates.put(FlowState.REPLIES, ask(state, scope, task.getSlots(), missing, errors, changed));
         }

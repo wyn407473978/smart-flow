@@ -1,12 +1,18 @@
-package com.example.smartflow.node;
+package com.example.smartflow.demo.node;
 
+import com.example.smartflow.node.AbstractNode;
+import com.example.smartflow.node.NodeSupport;
+import com.example.smartflow.node.NodeType;
+import com.example.smartflow.node.NodeScope;
+import com.example.smartflow.node.HistoryPolicy;
+import com.example.smartflow.demo.MinshengNames;
 import com.example.smartflow.flow.FlowNames;
 import com.example.smartflow.flow.FlowState;
 import com.example.smartflow.node.route.RouteCatalog;
 import com.example.smartflow.node.route.RouteSpec;
 import com.example.smartflow.tool.FlowTool;
-import com.example.smartflow.tool.UserInfoTool;
-import com.example.smartflow.tool.WeatherTool;
+import com.example.smartflow.demo.tool.UserInfoTool;
+import com.example.smartflow.demo.tool.WeatherTool;
 import dev.langchain4j.data.message.ChatMessage;
 import dev.langchain4j.data.message.UserMessage;
 import org.springframework.stereotype.Component;
@@ -62,7 +68,7 @@ public class BizQueryNode extends AbstractNode {
 
     @Override
     public String id() {
-        return FlowNames.BIZ_QUERY;
+        return MinshengNames.BIZ_QUERY;
     }
 
     @Override

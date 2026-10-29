@@ -1,5 +1,10 @@
-package com.example.smartflow.node;
+package com.example.smartflow.demo.node;
 
+import com.example.smartflow.node.AbstractNode;
+import com.example.smartflow.node.NodeSupport;
+import com.example.smartflow.node.NodeType;
+import com.example.smartflow.node.NodeScope;
+import com.example.smartflow.demo.MinshengNames;
 import com.example.smartflow.flow.FlowNames;
 import com.example.smartflow.flow.FlowState;
 import com.example.smartflow.node.route.RouteCatalog;
@@ -45,7 +50,7 @@ public class ChatNode extends AbstractNode {
 
     @Override
     public String id() {
-        return FlowNames.CHAT;
+        return MinshengNames.CHAT;
     }
 
     @Override

@@ -1,5 +1,6 @@
-package com.example.smartflow.tool;
+package com.example.smartflow.demo.tool;
 
+import com.example.smartflow.tool.FlowTool;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.langchain4j.agent.tool.ToolSpecification;
 import dev.langchain4j.model.chat.request.json.JsonObjectSchema;
