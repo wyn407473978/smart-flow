@@ -1,0 +1,70 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: smart-flow
+  threads:
+    virtual:
+      enabled: true
+  datasource:
+    url: jdbc:postgresql://localhost:55432/smart_flow
+    username: ai_user
+    password: ai_pass
+  sql:
+    init:
+      # 启动时执行框架的建表脚本（在 smart-flow-core 里，全部是 IF NOT EXISTS，可重复执行）。
+      # 业务自己的表可以追加在后面，例如 classpath:db/smart-flow-schema.sql,classpath:db/minsheng.sql
+      # 上线后改成 never，交给 Flyway 管理
+      mode: always
+      schema-locations: classpath:db/smart-flow-schema.sql
+      continue-on-error: false
+
+flow:
+  # 助手人设：各节点提示词里的名字和说话风格都从这里取，换业务只改这里
+  assistant:
+    name: 智慧民生助手
+    persona: 语气亲切、简洁、专业，用中文回答
+  model:
+    # 任意 OpenAI 协议兼容端点。默认是阿里云百炼的兼容模式
+    base-url: https://api.deepseek.com
+    api-key: ${DEEPSEEK_API_KEY:}
+    # 对话、槽位抽取用的主模型
+    chat-model: deepseek-flash
+    # 路由用的轻量模型（每轮都要调用，选便宜、快的）
+    router-model: deepseek-flash
+    # 后台记忆任务（滚动摘要、长期记忆抽取）用的模型，不配置时用 router-model
+    # memory-model: deepseek-flash
+    temperature: 0.3
+    timeout-seconds: 60
+    # 打开后会在日志里打印发给模型的 HTTP 报文，排查兼容性问题时用
+    log-http: false
+  memory:
+    # 节点默认带多少条历史消息（user + assistant 各算一条），节点可以通过 historyPolicy() 覆盖
+    recent-messages: 12
+    # 节点默认历史消息的 token 上限（估算），和条数限制同时生效
+    max-history-tokens: 3000
+    # 每轮最多从库里读多少条还没被摘要的消息
+    load-messages: 60
+    summary:
+      enabled: true
+      # 未摘要的消息超过这么多条时，后台把较早的部分压缩进摘要
+      trigger-messages: 24
+      # 压缩时保留最近多少条原文不动（必须小于 trigger-messages）
+      keep-recent: 12
+      # 摘要最多多少字
+      max-chars: 400
+    long-term:
+      # 按用户保存稳定信息，跨会话生效；请求里没有 userId 时不启用
+      enabled: true
+      max-items: 50
+  sse:
+    timeout-seconds: 180
+
+logging:
+  level:
+    com.example.smartflow: debug
+    # 想看 MyBatis 实际执行的 SQL 和参数时，把下面这些 Mapper 的级别改成 debug
+    com.example.smartflow.session.SessionMapper: info
+    com.example.smartflow.memory.MemoryMapper: info
+    com.example.smartflow.trace.TraceMapper: info
