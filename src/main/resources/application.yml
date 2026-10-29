@@ -1,0 +1,42 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: smart-flow
+  threads:
+    virtual:
+      enabled: true
+  datasource:
+    url: jdbc:postgresql://localhost:55432/smart_flow
+    username: ai_user
+    password: ai_pass
+  sql:
+    init:
+      # 启动时执行建表脚本（脚本里全部是 IF NOT EXISTS，可重复执行）。上线后改成 never，交给 Flyway 管理
+      mode: always
+      schema-locations: classpath:db/schema.sql
+      continue-on-error: false
+
+flow:
+  model:
+    # 任意 OpenAI 协议兼容端点。默认是阿里云百炼的兼容模式
+    base-url: https://api.deepseek.com
+    api-key: ${DEEPSEEK_API_KEY:}
+    # 对话、槽位抽取用的主模型
+    chat-model: deepseek-flash
+    # 路由用的轻量模型（每轮都要调用，选便宜、快的）
+    router-model: deepseek-flash
+    temperature: 0.3
+    timeout-seconds: 60
+    # 打开后会在日志里打印发给模型的 HTTP 报文，排查兼容性问题时用
+    log-http: false
+  memory:
+    # 每轮带给模型的最近消息条数（user + assistant 各算一条）
+    recent-messages: 12
+  sse:
+    timeout-seconds: 180
+
+logging:
+  level:
+    com.example.smartflow: debug
