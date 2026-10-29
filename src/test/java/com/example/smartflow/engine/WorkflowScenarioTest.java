@@ -71,6 +71,10 @@ class WorkflowScenarioTest {
     private final List<String> routerPrompts = new ArrayList<>();
     private final Deque<String> toolScript = new ArrayDeque<>();
     private final List<String> routerInputs = new ArrayList<>();
+    /** 业务查询节点最终回答末尾追加的内容，用来模拟模型不听话、自己提醒继续任务 */
+    private String finalSuffix = "";
+    /** 业务查询节点收到的系统提示词 */
+    private final List<String> bizPrompts = new java.util.concurrent.CopyOnWriteArrayList<>();
     private final Map<String, String> llmCallIds = new java.util.concurrent.ConcurrentHashMap<>();
     /** toolCallId → [工具名, 参数, 发起它的模型调用(节点/用途), 状态, 结果] */
     private final Map<String, List<String>> toolCalls = new java.util.LinkedHashMap<>();
@@ -244,6 +248,34 @@ class WorkflowScenarioTest {
         assertTrue(r.reply().contains("\"city\":\"杭州\""), r.reply());
         assertTrue(r.reply().endsWith("对了，刚才的活动创建还没完成，要继续吗？"), r.reply());
         assertEquals(1, r.state().getTaskStack().size());
+    }
+
+    /** 截图里的问题：模型自己提醒了"活动创建还没完成，需要继续吗"，引擎不应再追加一遍 */
+    @Test
+    void noDuplicateReminderWhenModelAlreadyReminded() {
+        taskThenAskCity("p6");
+
+        // 节点提示词里明确要求不要自己提醒
+        assertTrue(bizPrompts.get(bizPrompts.size() - 1).contains("不要提醒或询问用户是否继续那个任务"),
+                bizPrompts.get(bizPrompts.size() - 1));
+
+        // 但模型不一定听：模拟它在回答末尾自己提醒了
+        finalSuffix = "\n\n刚才那个活动创建还没完成，需要继续吗？";
+        routerScript.add("{\"action\":\"CONTINUE\",\"intent\":\"BIZ_QUERY\",\"reason\":\"回答追问\"}");
+        toolScript.add("get_weather:{\"city\":\"杭州\"}");
+        var r = turn("p6", "是的", List.of("router", "biz_query"), "collect_target");
+
+        assertTrue(r.reply().endsWith("刚才那个活动创建还没完成，需要继续吗？"), r.reply());
+        assertFalse(r.reply().contains("对了，刚才的活动创建还没完成"), "不应重复提醒: " + r.reply());
+    }
+
+    @Test
+    void alreadyRemindedDetection() {
+        assertTrue(WorkflowEngine.alreadyReminded("刚才那个活动创建还没完成，需要继续吗？", "活动创建"));
+        assertTrue(WorkflowEngine.alreadyReminded("要继续刚才的活动创建吗", "活动创建"));
+        // 只提到任务名、没问是否继续，不算提醒过
+        assertFalse(WorkflowEngine.alreadyReminded("活动创建需要先选模版", "活动创建"));
+        assertFalse(WorkflowEngine.alreadyReminded("要继续查别的城市吗", "活动创建"));
     }
 
     /** 用户没理追问，直接回答活动创建的问题：追问作废，继续任务 */
@@ -436,6 +468,7 @@ class WorkflowScenarioTest {
         public void doChat(ChatRequest request, StreamingChatResponseHandler handler) {
             new Thread(() -> {
                 if (systemText(request).contains("业务查询模块")) {
+                    bizPrompts.add(systemText(request));
                     List<String> results = request.messages().stream()
                             .filter(m -> m instanceof ToolExecutionResultMessage)
                             .map(m -> ((ToolExecutionResultMessage) m).text()).toList();
@@ -456,7 +489,7 @@ class WorkflowScenarioTest {
                                 .aiMessage(preamble == null ? AiMessage.from(calls) : AiMessage.from(preamble, calls)).build());
                         return;
                     }
-                    String text = "查询结果：" + String.join("；", results);
+                    String text = "查询结果：" + String.join("；", results) + finalSuffix;
                     handler.onPartialResponse(text);
                     handler.onCompleteResponse(ChatResponse.builder().aiMessage(AiMessage.from(text)).build());
                     return;

@@ -47,6 +47,7 @@ public class BizQueryNode extends AbstractNode {
     private static final String HAS_ACTIVE_TASK = """
 
             用户当前有一个进行中的"%s"，这次只是临时查询别的信息。只回答本次查询，不要替用户填写那个任务的任何参数。
+            也不要提醒或询问用户是否继续那个任务，系统会在你回答之后统一提醒，你再提一遍会重复。
             """;
 
     private final List<FlowTool> tools;

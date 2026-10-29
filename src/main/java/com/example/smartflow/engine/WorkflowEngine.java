@@ -115,7 +115,7 @@ public class WorkflowEngine {
 
             // 4. 组装回复：节点回复 + 插话后的任务恢复提示
             List<String> parts = new ArrayList<>(finalState.replies());
-            resumeHint(finalState, ctx).ifPresent(hint -> {
+            resumeHint(finalState, ctx, String.join("", parts)).ifPresent(hint -> {
                 ctx.beginReply();
                 ctx.emitToken(hint);
                 parts.add(hint);
@@ -161,15 +161,26 @@ public class WorkflowEngine {
 
     /**
      * 用户在任务进行中插话（闲聊、业务查询），处理完以后提醒一下还有未完成的任务。
-     * 如果插话的节点还在追问用户（例如问城市），先不提醒，否则一条回复里会有两个问题，用户回答"是的"时分不清在回答哪个。
+     * <ul>
+     *   <li>插话的节点还在追问用户（例如问城市）时不提醒，否则一条回复里会有两个问题，用户回答"是的"时分不清在回答哪个</li>
+     *   <li>节点的回复里已经自己提醒过了（提示词里要求了不要提醒，但模型不一定听）就不再重复</li>
+     * </ul>
      * 用固定文案而不是让模型生成，保证每次都出现、内容可控。
      */
-    private Optional<String> resumeHint(FlowState state, TurnContext ctx) {
+    private Optional<String> resumeHint(FlowState state, TurnContext ctx, String replySoFar) {
         RouteDecision route = ctx.route();
         if (route == null || !route.sideTrip() || state.pendingQuestion().isPresent()) {
             return Optional.empty();
         }
-        return state.activeTask().map(t -> "对了，刚才的" + catalog.taskName(t.getTaskType()) + "还没完成，要继续吗？");
+        return state.activeTask()
+                .map(t -> catalog.taskName(t.getTaskType()))
+                .filter(name -> !alreadyReminded(replySoFar, name))
+                .map(name -> "对了，刚才的" + name + "还没完成，要继续吗？");
+    }
+
+    /** 回复里同时提到了任务名和"继续"，就认为节点已经自己提醒过了 */
+    static boolean alreadyReminded(String reply, String taskName) {
+        return reply != null && reply.contains(taskName) && reply.contains("继续");
     }
 
     private static List<TaskFrame> openTasks(List<TaskFrame> stack) {

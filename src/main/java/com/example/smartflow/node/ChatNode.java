@@ -33,6 +33,7 @@ public class ChatNode extends AbstractNode {
     private static final String HAS_ACTIVE_TASK = """
             用户当前有一个进行中的"%s"，这次只是临时问了别的问题。
             请只回答当前问题，不要替用户填写或猜测这个任务的任何参数。
+            也不要提醒或询问用户是否继续这个任务，系统会在你回答之后统一提醒，你再提一遍会重复。
             """;
 
     private final RouteCatalog catalog;
