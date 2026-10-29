@@ -5,6 +5,8 @@ Spring Boot 3.5 + LangChain4j 1.19 + LangGraph4j 1.8（LTS）+ MyBatis 3 + Postg
 框架和业务分开放在不同模块里：新工作流依赖 `smart-flow-core`（需要 HTTP 接口和测试页再加 `smart-flow-web`），
 只写自己的节点和工具，引擎、路由、记忆、trace 都不用改。`smart-flow-demo` 是一个完整的示例工作流（智慧民生）。
 
+**从零搭一个新工作流：见 [docs/new-workflow.md](docs/new-workflow.md)**（以物业报修为例，3 个节点）。
+
 ## 模块
 
 | 模块 | 内容 | 业务工程是否依赖 |
@@ -23,10 +25,11 @@ core 和 web 都是 Spring Boot 自动配置（`FlowCoreAutoConfiguration`、`Fl
 | A 路由 | `router` | ROUTER | 每轮必经。提示词由子节点的路由声明自动拼成；模型判断 action + intent，去向和任务栈变化由代码决定 |
 | B2 业务查询 | `biz_query` | TOOL_AGENT | 挂载 `get_weather`（查天气，演示数据）、`get_user_info`（查本人信息：rise / 27 岁）；手写 tool loop，流式输出 |
 | B3 闲聊 | `chat` | CHAT | 流式回复；根路由的兜底节点 |
-| C1 目标人群 | `collect_target` | SLOT_FILLING | 抽取年龄 / 性别 / 区域 → 代码校验合并 → 收齐则同一轮进入 C2，否则流式追问 |
-| C2 模版确认 | `choose_template` | PLACEHOLDER | 占位节点，用来验证 C1→C2 同轮流转 |
+| C1 目标人群 | `collect_target` | SLOT_FILLING | 活动创建任务的入口。`SlotFillingNode`：年龄范围 / 性别 / 区域，收齐则同一轮进入 C2，否则流式追问 |
+| C2 模版和时间 | `choose_template` | SLOT_FILLING | `SlotFillingNode`：活动模版（4 选 1）、活动时间，收齐则同一轮进入 C3 |
+| C3 确认创建 | `submit_activity` | CONFIRM | `ConfirmNode`：展示汇总请用户确认 → 创建活动（带幂等键）；要修改时回到 C1 |
 
-支持的对话行为：开始任务、多轮补充、修改已填信息、任务中插话（回答后提示继续）、取消任务、路由输出异常兜底。
+支持的对话行为：开始任务、多轮补充、修改已填信息、任务中插话（回答后提示继续）、确认前修改、取消任务、路由输出异常兜底。
 
 ## 快速开始
 
@@ -120,8 +123,17 @@ public class ComplaintNode extends AbstractNode {
 | `taskEntry` | 多轮任务的入口，路由到这里会开启任务并压栈 | 活动创建（C1） |
 | `fallback` | 兜底，意图不认识或模型输出异常时去这里，每个路由节点有且只有一个 | 闲聊 |
 
-任务内部的后续阶段（C2、C3）不声明 `routeSpec`，它们只能由上一阶段推进过来：在上一阶段里 `task.setCurrentNode(下一阶段)` 并 `goTo(updates, 下一阶段)`。
-任务阶段节点可以覆盖 `stageDescription()`，告诉路由模型"现在在等用户提供什么"，提高短回答（例如"女性"）判成 CONTINUE 的准确率。
+任务内部的后续阶段（C2、C3）不声明 `routeSpec`，它们只能由上一阶段推进过来。框架提供了两种现成的任务阶段节点，一般不用自己处理任务栈：
+
+| 基类 | 用途 | 子类要写的 |
+|---|---|---|
+| `SlotFillingNode` | 多轮收集信息：抽取 → 代码校验合并 → 收齐推进 / 没收齐追问 | `slots()`（`SlotSpec` 声明）、`stageGoal()`、`nextNode()` |
+| `ConfirmNode` | 任务最后一步：展示汇总 → 确认后执行写操作 / 修改回到前面的阶段 / 取消 | `summary()`、`commit()`（带幂等键）、`editNode()` |
+
+自己写任务节点时用 `editTasks(state)` 拿到任务栈副本：`advanceTo(下一阶段)` 推进、`complete()` 完成、`cancel()` 取消，
+再 `writeTo(updates)`；要在本轮内继续执行下一阶段还需要 `goTo(updates, 下一阶段)`。
+任务阶段节点的 `stageDescription()` 会告诉路由模型"现在在等用户提供什么"，提高短回答（例如"女性"）判成 CONTINUE 的准确率；
+`SlotFillingNode` 默认用 `stageGoal()`，`ConfirmNode` 默认是"等用户确认"。
 
 自动完成的事情：
 - 路由提示词的模块列表、兜底意图（`IntentRouterNode.systemPrompt()` 可以直接打印出来看）
@@ -203,7 +215,7 @@ public HistoryPolicy historyPolicy() {
 | 路由 | 6 | ✓ | | |
 | 闲聊 | 默认（12） | ✓ | ✓ | |
 | 业务查询 | 默认（12） | ✓ | ✓ | ✓ |
-| C1 收集目标人群 | 6 | ✓ | ✓ | |
+| 收集信息（`SlotFillingNode`） | 6 | ✓ | ✓ | |
 
 **配置**（`flow.memory`，各工作流在自己的 application.yml 里调整）：`recent-messages`、`max-history-tokens`、`load-messages`、`summary.*`、`long-term.*`，记忆任务用的模型是 `flow.model.memory-model`（不配置时用 `router-model`）。
 
@@ -235,14 +247,17 @@ mvn test
 
 - `FrameworkResourcesTest`（core）：Mapper XML、自动配置注册文件、建表脚本都打进了 jar
 - `FlowPropertiesBindingTest`（core）：配置 record 都能被 Spring Boot 绑定
-- `CollectTargetNodeTest`（demo）：槽位校验 / 合并逻辑的纯单元测试
-- `WorkflowScenarioTest`（demo）：多轮场景测试，用按脚本返回的 stub 模型 + 内存存储，不需要数据库和真实模型。覆盖开始任务、补充、插话、非法 JSON 重试、同轮流转 C2、取消、路由兜底
+- `SlotsTest`、`TaskStackEditTest`、`ConfirmNodeTest`（core）：槽位转换 / 校验 / 合并、任务栈操作、确认词判定
+- `CollectTargetNodeTest`（demo）：业务槽位规则（年龄不限、范围替换、下限不能大于上限）
+- `WorkflowScenarioTest`（demo）：多轮场景测试，用按脚本返回的 stub 模型 + 内存存储，不需要数据库和真实模型。
+  覆盖开始任务、补充、插话、非法 JSON 重试、C1→C2→C3 同轮流转、确认后创建、确认前修改、写操作失败重试、取消、路由兜底
 
 这两类测试就是后续 Evals 的起点：场景脚本保留，把 stub 换成真实模型 + LLM 扮演用户，就是端到端评测。
 
 ## 下一步
 
-- C2：换成 TOOL_AGENT 节点，挂"查询可用模版"工具，手写 tool loop 并落 `flow_tool_call`
-- C3：二次确认节点，确认后由代码调用创建接口，带幂等键
-- 会话锁换 Redis；trace 改为异步批量写
+- Evals：用例集格式、真实模型批量跑、路由准确率统计；从 `flow_turn` 一键生成用例
+- 工具上下文带上 `userId` 和调用方透传的业务上下文；接口鉴权
+- 模型按名字注册多个（不同供应商），节点按名字选用，失败重试和降级
+- 会话锁换 Redis；trace 改为异步批量写；Flyway 管理表结构
 - 长期记忆的过期策略（例如超过一定时间没被用到的记忆降权或删除）
