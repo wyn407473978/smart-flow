@@ -1,6 +1,7 @@
 package com.example.smartflow.config;
 
 import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.boot.context.properties.bind.ConstructorBinding;
 
 @ConfigurationProperties(prefix = "flow")
 public record FlowProperties(Model model, Memory memory, Sse sse) {
@@ -16,6 +17,8 @@ public record FlowProperties(Model model, Memory memory, Sse sse) {
                         Integer timeoutSeconds,
                         Boolean logHttp,
                         String memoryModel) {
+        /** record 有多个构造器时，必须标明配置绑定用哪个，否则 Spring Boot 不会绑定，整个配置为 null */
+        @ConstructorBinding
         public Model {
             if (memoryModel == null || memoryModel.isBlank()) {
                 memoryModel = routerModel;
@@ -42,6 +45,7 @@ public record FlowProperties(Model model, Memory memory, Sse sse) {
                          Integer loadMessages,
                          Summary summary,
                          LongTerm longTerm) {
+        @ConstructorBinding
         public Memory {
             if (recentMessages == null || recentMessages <= 0) {
                 recentMessages = 12;
