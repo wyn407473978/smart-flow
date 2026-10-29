@@ -335,7 +335,7 @@
           flushTokens();
           log('tool', `${d.name}(${d.arguments || ''}) → ${d.result}  ${d.status} ${d.latencyMs}ms`, d.status === 'ERROR' ? 'error' : ''); break;
         case 'route':
-          log('route', `${d.action} / ${d.intent} → ${d.target}${d.fallback ? '  [兜底]' : ''}  ${d.reason || ''}`); break;
+          log('route', `${d.action} / ${d.intent} → ${d.target}${d.fallback ? '  [兜底]' : ''}${d.sideTrip ? '  [插话]' : ''}  ${d.reason || ''}`); break;
         case 'token':
           reply += d.text; tokenBuf += d.text; ai.body.textContent = reply;
           $('messages').scrollTop = $('messages').scrollHeight; break;
@@ -404,9 +404,12 @@
     const tasks = stack.length ? stack.map((t, i) => `
       <div class="card"><div class="hd">
         <b>${esc(t.taskType)}</b>${i === stack.length - 1 ? '<span class="tag ok">栈顶</span>' : ''}
+        ${t.ephemeral ? '<span class="tag task">等待用户回答</span>' : ''}
         <span class="tag">${esc(t.status)}</span><span class="grow"></span>
         <span class="muted mono">当前节点</span><span class="path"><span class="node">${esc(t.currentNode)}</span></span>
-      </div><div class="bd"><div class="label">已收集槽位</div><pre class="json">${esc(pretty(t.slots))}</pre></div></div>`).join('')
+      </div><div class="bd">${t.ephemeral
+        ? `<div class="label">追问的问题（用户下一句如果是在回答它，会回到 ${esc(t.currentNode)}）</div><div>${esc(t.awaiting || '')}</div>`
+        : `<div class="label">已收集槽位</div><pre class="json">${esc(pretty(t.slots))}</pre>`}</div></div>`).join('')
       : '<div class="card"><div class="bd muted">任务栈为空</div></div>';
     pane.innerHTML = `<div class="label">任务栈（${stack.length}）</div>${tasks}
       <details><summary>完整会话状态 JSON</summary><pre class="json">${esc(pretty(state))}</pre></details>`;

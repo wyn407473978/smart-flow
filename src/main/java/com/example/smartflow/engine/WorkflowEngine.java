@@ -160,12 +160,13 @@ public class WorkflowEngine {
     }
 
     /**
-     * 用户在任务进行中插话（闲聊、业务查询），回答完以后提醒一下还有未完成的任务。
+     * 用户在任务进行中插话（闲聊、业务查询），处理完以后提醒一下还有未完成的任务。
+     * 如果插话的节点还在追问用户（例如问城市），先不提醒，否则一条回复里会有两个问题，用户回答"是的"时分不清在回答哪个。
      * 用固定文案而不是让模型生成，保证每次都出现、内容可控。
      */
     private Optional<String> resumeHint(FlowState state, TurnContext ctx) {
         RouteDecision route = ctx.route();
-        if (route == null || route.action() != RouteDecision.Action.DIGRESS) {
+        if (route == null || !route.sideTrip() || state.pendingQuestion().isPresent()) {
             return Optional.empty();
         }
         return state.activeTask().map(t -> "对了，刚才的" + catalog.taskName(t.getTaskType()) + "还没完成，要继续吗？");

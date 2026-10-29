@@ -30,6 +30,7 @@ import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.data.message.ChatMessage;
 import dev.langchain4j.data.message.SystemMessage;
 import dev.langchain4j.data.message.ToolExecutionResultMessage;
+import dev.langchain4j.data.message.UserMessage;
 import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.chat.StreamingChatModel;
 import dev.langchain4j.model.chat.listener.ChatModelListener;
@@ -69,6 +70,7 @@ class WorkflowScenarioTest {
     private final FakeSessions sessions = new FakeSessions();
     private final List<String> routerPrompts = new ArrayList<>();
     private final Deque<String> toolScript = new ArrayDeque<>();
+    private final List<String> routerInputs = new ArrayList<>();
     private final Map<String, String> llmCallIds = new java.util.concurrent.ConcurrentHashMap<>();
     /** toolCallId → [工具名, 参数, 发起它的模型调用(节点/用途), 状态, 结果] */
     private final Map<String, List<String>> toolCalls = new java.util.LinkedHashMap<>();
@@ -201,6 +203,97 @@ class WorkflowScenarioTest {
         assertTrue(r.reply().contains("工具执行失败"), "错误信息应传回模型: " + r.reply());
     }
 
+    // =====================================================================
+    // 追问：一次性节点向用户提问后，用户的回答要回到这个节点
+    // =====================================================================
+
+    private static final String ASK_CITY = "ask_user:{\"question\":\"请问还是查杭州今天的天气吗？\"}";
+
+    /** 先开一个活动创建任务，再插话问天气，业务查询节点追问城市 */
+    private void taskThenAskCity(String sid) {
+        routerScript.add("{\"action\":\"START\",\"intent\":\"ACTIVITY_CREATE\",\"reason\":\"\"}");
+        extractScript.add("{}");
+        turn(sid, "我想办一个活动", List.of("router", "collect_target"), "collect_target");
+
+        routerScript.add("{\"action\":\"DIGRESS\",\"intent\":\"BIZ_QUERY\",\"reason\":\"查天气\"}");
+        toolScript.add(ASK_CITY);
+        var r = turn(sid, "今天天气怎么样", List.of("router", "biz_query"), "collect_target");
+
+        // 追问时不追加"要继续吗"，一条回复里只有一个问题
+        assertEquals("请问还是查杭州今天的天气吗？", r.reply());
+        var stack = r.state().getTaskStack();
+        assertEquals(2, stack.size());
+        assertTrue(stack.get(1).isEphemeral(), "栈顶应是追问帧");
+        assertEquals("biz_query", stack.get(1).getCurrentNode());
+        assertEquals("请问还是查杭州今天的天气吗？", stack.get(1).getAwaiting());
+    }
+
+    /** 截图里的问题：用户回答"是的"是在回答追问，应该回到业务查询，而不是继续活动创建 */
+    @Test
+    void answerToPendingQuestionGoesBackToAskingNode() {
+        taskThenAskCity("p1");
+
+        routerScript.add("{\"action\":\"CONTINUE\",\"intent\":\"BIZ_QUERY\",\"reason\":\"回答追问\"}");
+        toolScript.add("get_weather:{\"city\":\"杭州\"}");
+        var r = turn("p1", "是的", List.of("router", "biz_query"), "collect_target");
+
+        // 路由模型看得到这个追问
+        assertTrue(routerInputs.get(routerInputs.size() - 1)
+                .contains("待回答的问题：来自\"业务查询\"（BIZ_QUERY）：请问还是查杭州今天的天气吗？"), routerInputs.toString());
+        // 查完天气，追问帧去掉，这时才提示继续活动创建
+        assertTrue(r.reply().contains("\"city\":\"杭州\""), r.reply());
+        assertTrue(r.reply().endsWith("对了，刚才的活动创建还没完成，要继续吗？"), r.reply());
+        assertEquals(1, r.state().getTaskStack().size());
+    }
+
+    /** 用户没理追问，直接回答活动创建的问题：追问作废，继续任务 */
+    @Test
+    void pendingQuestionDroppedWhenUserContinuesTask() {
+        taskThenAskCity("p2");
+
+        routerScript.add("{\"action\":\"CONTINUE\",\"intent\":\"ACTIVITY_CREATE\",\"reason\":\"回答活动人群\"}");
+        extractScript.add("{\"ageMin\":60,\"gender\":\"FEMALE\"}");
+        var r = turn("p2", "60岁以上的女性", List.of("router", "collect_target"), "collect_target");
+        assertEquals(1, r.state().getTaskStack().size());
+        assertFalse(r.reply().contains("要继续吗"), r.reply());
+    }
+
+    /** 用户换了个话题：追问作废 */
+    @Test
+    void pendingQuestionDroppedOnNewTopic() {
+        taskThenAskCity("p3");
+
+        routerScript.add("{\"action\":\"DIGRESS\",\"intent\":\"CHAT\",\"reason\":\"闲聊\"}");
+        var r = turn("p3", "你是谁", List.of("router", "chat"), "collect_target");
+        assertEquals(1, r.state().getTaskStack().size());
+        assertTrue(r.reply().endsWith("要继续吗？"), r.reply());
+    }
+
+    /** 没有任务、只有追问时用户说"不用了" */
+    @Test
+    void cancelPendingQuestionWithoutTask() {
+        routerScript.add("{\"action\":\"START\",\"intent\":\"BIZ_QUERY\",\"reason\":\"\"}");
+        toolScript.add(ASK_CITY);
+        var asked = turn("p4", "今天天气怎么样", List.of("router", "biz_query"), "biz_query");
+        assertEquals("请问还是查杭州今天的天气吗？", asked.reply());
+
+        routerScript.add("{\"action\":\"CANCEL\",\"intent\":\"BIZ_QUERY\",\"reason\":\"不查了\"}");
+        var r = turn("p4", "不用了", List.of("router"), null);
+        assertTrue(r.reply().startsWith("好的，那先不查了"), r.reply());
+        assertTrue(r.state().getTaskStack().isEmpty());
+    }
+
+    /** 路由模型输出不可用时，有追问优先回到追问的节点 */
+    @Test
+    void routerFallbackPrefersPendingQuestion() {
+        taskThenAskCity("p5");
+
+        routerScript.add("bad");
+        routerScript.add("still bad");
+        toolScript.add("get_weather:{\"city\":\"杭州\"}");
+        turn("p5", "是的", List.of("router", "biz_query"), "collect_target");
+    }
+
     @Test
     void bizQueryIsRegisteredInRouterPrompt() {
         String prompt = ((RouterNode) nodes.get(0)).systemPrompt();
@@ -317,6 +410,7 @@ class WorkflowScenarioTest {
             String sys = systemText(request);
             if (sys.contains("路由模块")) {
                 routerPrompts.add(sys);
+                routerInputs.add(((UserMessage) request.messages().get(request.messages().size() - 1)).singleText());
             }
             String out = sys.contains("路由模块") ? routerScript.pop()
                     : sys.contains("信息抽取模块") ? extractScript.pop() : "{}";
@@ -353,9 +447,13 @@ class WorkflowScenarioTest {
                             calls.add(ToolExecutionRequest.builder().id("call_" + calls.size())
                                     .name(c.substring(0, i)).arguments(c.substring(i + 1)).build());
                         }
-                        handler.onPartialResponse("我查一下。");
+                        boolean asking = calls.stream().anyMatch(c -> c.name().equals("ask_user"));
+                        String preamble = asking ? null : "我查一下。";
+                        if (preamble != null) {
+                            handler.onPartialResponse(preamble);
+                        }
                         handler.onCompleteResponse(ChatResponse.builder()
-                                .aiMessage(AiMessage.from("我查一下。", calls)).build());
+                                .aiMessage(preamble == null ? AiMessage.from(calls) : AiMessage.from(preamble, calls)).build());
                         return;
                     }
                     String text = "查询结果：" + String.join("；", results);

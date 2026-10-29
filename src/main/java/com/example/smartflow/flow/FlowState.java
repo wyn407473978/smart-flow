@@ -74,15 +74,25 @@ public class FlowState extends AgentState {
         return this.<List<TaskFrame>>value(TASK_STACK).orElse(List.of());
     }
 
-    /** 栈顶第一个仍在进行中的任务 */
+    /** 最靠近栈顶的、仍在进行中的多轮任务（不含临时追问帧） */
     public Optional<TaskFrame> activeTask() {
         List<TaskFrame> stack = taskStack();
         for (int i = stack.size() - 1; i >= 0; i--) {
-            if (stack.get(i).isOpen()) {
+            if (stack.get(i).isOpen() && !stack.get(i).isEphemeral()) {
                 return Optional.of(stack.get(i));
             }
         }
         return Optional.empty();
+    }
+
+    /** 栈顶的临时追问帧：某个一次性节点上一轮向用户提了问题，正在等回答 */
+    public Optional<TaskFrame> pendingQuestion() {
+        List<TaskFrame> stack = taskStack();
+        if (stack.isEmpty()) {
+            return Optional.empty();
+        }
+        TaskFrame top = stack.get(stack.size() - 1);
+        return top.isOpen() && top.isEphemeral() ? Optional.of(top) : Optional.empty();
     }
 
     public Optional<RouteDecision> route() {

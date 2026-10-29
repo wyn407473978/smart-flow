@@ -10,12 +10,15 @@ import java.io.Serializable;
  * @param target   最终要去的节点（代码计算）
  * @param reason   模型给出的理由，便于排查
  * @param fallback 是否因为模型输出异常或意图不认识走了兜底
+ * @param sideTrip 本轮去处理的不是进行中的多轮任务（插话、回答临时追问等），
+ *                 处理完且没有新的追问时，引擎会提示用户继续原任务
  */
 public record RouteDecision(Action action,
                             String intent,
                             String target,
                             String reason,
-                            boolean fallback) implements Serializable {
+                            boolean fallback,
+                            boolean sideTrip) implements Serializable {
 
     public enum Action {
         /** 继续当前任务（用户在回答当前任务的问题） */

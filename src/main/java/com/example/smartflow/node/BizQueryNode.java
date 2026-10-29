@@ -37,7 +37,8 @@ public class BizQueryNode extends AbstractNode {
 
             规则：
             1. 需要数据时必须调用工具获取，不要凭记忆或猜测回答，不要编造工具没有返回的信息。
-            2. 调用工具缺少必要参数时（例如查天气没说城市），先向用户询问，不要自己假设。
+            2. 缺少必要参数（例如查天气没说城市），或者需要用户确认（例如"还是查杭州吗"）时，调用 ask_user 工具提问，
+               不要自己假设，也不要在普通回复里直接提问。
             3. 工具返回错误时，如实告诉用户暂时查询失败，不要编造结果。
             4. 拿到结果后直接回答用户的问题，不要提到"工具""接口""JSON"这类技术词。
             5. 超出可用工具范围的问题，说明目前还不支持查询。
@@ -93,8 +94,15 @@ public class BizQueryNode extends AbstractNode {
         messages.addAll(historyMessages(state, support.props().memory().recentMessages()));
         messages.add(UserMessage.from(state.userInput()));
 
-        String text = streamWithTools(scope, "answer", messages, tools, MAX_TOOL_ROUNDS);
-        return reply(text);
+        ToolLoopResult result = streamWithTools(scope, "answer", messages, tools, MAX_TOOL_ROUNDS);
+        Map<String, Object> updates = reply(result.text());
+        if (result.asked()) {
+            // 追问了用户（例如问城市），下一轮用户的回答会被送回这里
+            awaitAnswer(state, updates, result.question());
+        } else {
+            closeAwait(state, updates);
+        }
+        return updates;
     }
 
     private String systemPrompt(String activeTaskName) {

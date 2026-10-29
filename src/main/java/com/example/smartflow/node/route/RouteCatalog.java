@@ -65,7 +65,14 @@ public class RouteCatalog {
     /** 任务类型的中文名，例如 ACTIVITY_CREATE → 活动创建 */
     public String taskName(String taskType) {
         RouteOption entry = snapshot().taskEntries.get(taskType);
-        return entry == null ? taskType : entry.spec().name();
+        if (entry != null) {
+            return entry.spec().name();
+        }
+        // 临时追问帧的 taskType 是一次性节点的意图编码，例如 BIZ_QUERY → 业务查询
+        return snapshot().byParent.values().stream().flatMap(List::stream)
+                .filter(o -> o.spec().intent().equalsIgnoreCase(taskType))
+                .map(o -> o.spec().name())
+                .findFirst().orElse(taskType);
     }
 
     /** 节点当前阶段的说明，路由节点会把它告诉模型 */

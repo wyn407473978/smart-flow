@@ -5,6 +5,7 @@ import com.example.smartflow.engine.TurnEvent;
 import com.example.smartflow.flow.FlowNames;
 import com.example.smartflow.flow.FlowState;
 import com.example.smartflow.flow.HistoryMessage;
+import com.example.smartflow.flow.TaskFrame;
 import com.example.smartflow.node.route.RouteSpec;
 import com.example.smartflow.tool.FlowTool;
 import com.example.smartflow.trace.TraceKeys;
@@ -216,35 +217,100 @@ public abstract class AbstractNode implements NodeAction<FlowState> {
         return text.toString();
     }
 
+    /** 内置的"向用户提问"工具名 */
+    public static final String ASK_USER = "ask_user";
+
+    /**
+     * 内置工具：模型需要用户补充或确认信息时调用它，而不是直接在回复里提问。
+     * 这样代码能确切知道"这个节点在等用户回答"，下一轮路由会把用户的回答送回这个节点。
+     */
+    private static final ToolSpecification ASK_USER_SPEC = ToolSpecification.builder()
+            .name(ASK_USER)
+            .description("需要用户补充或确认信息才能继续时调用（例如查天气不知道城市、需要用户确认是不是某个城市）。"
+                    + "question 是要对用户说的话。调用后本轮结束，等用户回答。"
+                    + "调用这个工具时不要再输出其他文字，也不要在普通回复里向用户提问。")
+            .parameters(JsonObjectSchema.builder()
+                    .addStringProperty("question", "要问用户的话，简短、口语化")
+                    .required("question")
+                    .build())
+            .build();
+
+    /** 只用来让 ask_user 和普通工具走同一套落库逻辑 */
+    private static final FlowTool ASK_USER_TOOL = new FlowTool() {
+        @Override
+        public ToolSpecification specification() {
+            return ASK_USER_SPEC;
+        }
+
+        @Override
+        public String execute(Map<String, Object> arguments, ToolContext context) {
+            return "{\"status\":\"已向用户提问，等待回答\"}";
+        }
+    };
+
+    /**
+     * tool loop 的结果。
+     *
+     * @param text     本节点输出给用户的全部文字（和推给前端的一致）
+     * @param question 模型通过 ask_user 向用户提的问题；为 null 表示已经给出了最终回答
+     */
+    public record ToolLoopResult(String text, String question) {
+        public boolean asked() {
+            return question != null;
+        }
+    }
+
     /**
      * 带工具的流式对话（手写 tool loop）：
      * <ol>
-     *   <li>把工具定义随请求发给模型，模型输出的文字实时推给前端</li>
+     *   <li>把工具定义（外加内置的 ask_user）随请求发给模型，模型输出的文字实时推给前端</li>
      *   <li>模型要求调用工具时，逐个执行并把结果追加进对话（每次调用都落 flow_tool_call，并推送 tool 事件）</li>
-     *   <li>重复，直到模型不再调用工具，给出最终回答</li>
+     *   <li>重复，直到模型不再调用工具给出最终回答，或者调用 ask_user 向用户提问</li>
      * </ol>
+     * 调用方拿到结果后：{@link ToolLoopResult#asked()} 为 true 时调用 {@link #awaitAnswer}，否则调用 {@link #closeAwait}。
      *
      * @param maxRounds 最多允许几轮工具调用，防止模型反复调用工具死循环
-     * @return 本节点输出给用户的全部文字（各轮文字按顺序拼接，和推给前端的一致）
      */
-    protected String streamWithTools(NodeScope scope, String purpose, List<ChatMessage> messages,
-                                     List<FlowTool> tools, int maxRounds) throws Exception {
+    protected ToolLoopResult streamWithTools(NodeScope scope, String purpose, List<ChatMessage> messages,
+                                             List<FlowTool> tools, int maxRounds) throws Exception {
         Map<String, FlowTool> byName = new LinkedHashMap<>();
         for (FlowTool tool : tools) {
             byName.put(tool.name(), tool);
         }
-        List<ToolSpecification> specs = tools.stream().map(FlowTool::specification).toList();
+        byName.put(ASK_USER, ASK_USER_TOOL);
+        List<ToolSpecification> specs = byName.values().stream().map(FlowTool::specification).toList();
 
         List<ChatMessage> msgs = new ArrayList<>(messages);
         StringBuilder text = new StringBuilder();
         for (int round = 1; round <= maxRounds; round++) {
             String callId = UUID.randomUUID().toString();
+            int roundStart = text.length();
             ChatRequest request = ChatRequest.builder().messages(msgs).toolSpecifications(specs).build();
             AiMessage ai = streamChat(scope, round == 1 ? purpose : purpose + "#" + round, request, callId, text)
                     .aiMessage();
             if (!ai.hasToolExecutionRequests()) {
-                return text.toString();
+                return new ToolLoopResult(text.toString(), null);
             }
+
+            Optional<ToolExecutionRequest> ask = ai.toolExecutionRequests().stream()
+                    .filter(c -> ASK_USER.equals(c.name())).findFirst();
+            if (ask.isPresent()) {
+                if (ai.toolExecutionRequests().size() > 1) {
+                    log.warn("节点 {} 在同一轮里既调用了 ask_user 又调用了其他工具，其他工具被忽略", id());
+                }
+                runTool(scope, callId, ask.get(), byName);
+                String roundText = text.substring(roundStart).strip();
+                String question = askUserQuestion(ask.get());
+                if (roundText.isEmpty()) {
+                    // 正常情况：问题在工具参数里，推给用户
+                    appendRoundText(scope, text, question);
+                } else if (question.isBlank()) {
+                    // 模型把问题写在了正文里
+                    question = roundText;
+                }
+                return new ToolLoopResult(text.toString(), question.isBlank() ? text.toString().strip() : question);
+            }
+
             msgs.add(ai);
             for (ToolExecutionRequest call : ai.toolExecutionRequests()) {
                 msgs.add(ToolExecutionResultMessage.from(call, runTool(scope, callId, call, byName)));
@@ -253,7 +319,50 @@ public abstract class AbstractNode implements NodeAction<FlowState> {
         log.warn("节点 {} 工具调用超过 {} 轮，强制结束", id(), maxRounds);
         String giveUp = "抱歉，这个问题需要的查询步骤太多，我暂时没能完成，可以换个问法再试试。";
         appendRoundText(scope, text, giveUp);
-        return text.toString();
+        return new ToolLoopResult(text.toString(), null);
+    }
+
+    private String askUserQuestion(ToolExecutionRequest call) {
+        try {
+            Map<String, Object> args = support.llmJsonMapper().readValue(blankToEmptyJson(call.arguments()),
+                    new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() { });
+            Object q = args == null ? null : args.get("question");
+            return q == null ? "" : q.toString().strip();
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    // ------------------------------------------------------------------ 追问帧
+
+    /**
+     * 本节点向用户追问了，等用户回答：在任务栈顶放一个临时追问帧（本节点已有追问帧就更新问题）。
+     * 下一轮路由看到它，用户回答了就回到本节点，换了话题就丢掉它。
+     */
+    protected void awaitAnswer(FlowState state, Map<String, Object> updates, String question) {
+        List<TaskFrame> stack = new ArrayList<>();
+        for (TaskFrame f : state.taskStack()) {
+            if (f.isOpen() && !f.isEphemeral()) {
+                stack.add(f.copy());
+            }
+        }
+        String intent = routeSpec().map(RouteSpec::intent).orElse(id());
+        stack.add(TaskFrame.awaitingAnswer(intent, id(), question));
+        updates.put(FlowState.TASK_STACK, stack);
+    }
+
+    /** 本节点已经给出最终回答：如果之前在等用户回答，把追问帧去掉 */
+    protected void closeAwait(FlowState state, Map<String, Object> updates) {
+        if (state.taskStack().stream().noneMatch(TaskFrame::isEphemeral)) {
+            return;
+        }
+        List<TaskFrame> stack = new ArrayList<>();
+        for (TaskFrame f : state.taskStack()) {
+            if (f.isOpen() && !f.isEphemeral()) {
+                stack.add(f.copy());
+            }
+        }
+        updates.put(FlowState.TASK_STACK, stack);
     }
 
     /** 执行一次工具调用并落库。工具出错时把错误信息返回给模型，让它自己决定怎么回复用户 */
@@ -358,6 +467,7 @@ public abstract class AbstractNode implements NodeAction<FlowState> {
             }
             sb.append('\n');
         }
+        sb.append(ASK_USER).append("（内置，streamWithTools 自动挂载）：").append(ASK_USER_SPEC.description());
         return sb.toString().stripTrailing();
     }
 

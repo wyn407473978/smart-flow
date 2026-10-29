@@ -108,7 +108,7 @@ public class CollectTargetNode extends AbstractNode {
         int activeIndex = -1;
         for (TaskFrame f : state.taskStack()) {
             stack.add(f.copy());
-            if (f.isOpen()) {
+            if (f.isOpen() && !f.isEphemeral()) {
                 activeIndex = stack.size() - 1;
             }
         }
