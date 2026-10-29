@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.example.smartflow.session.SessionMapper">
+
+    <!-- record 没有 setter，用构造器映射；arg 顺序和类型必须和构造器一致 -->
+    <resultMap id="sessionRow" type="com.example.smartflow.session.SessionMapper$SessionRow">
+        <constructor>
+            <arg column="session_id" javaType="string"/>
+            <arg column="user_id" javaType="string"/>
+            <arg column="state" javaType="string"/>
+            <arg column="turn_count" javaType="_int"/>
+        </constructor>
+    </resultMap>
+
+    <resultMap id="historyMessage" type="com.example.smartflow.flow.HistoryMessage">
+        <constructor>
+            <arg column="role" javaType="string"/>
+            <arg column="content" javaType="string"/>
+            <arg column="id" javaType="long"/>
+            <arg column="turn_id" javaType="string"/>
+        </constructor>
+    </resultMap>
+
+    <!-- 只取 role、content，走 HistoryMessage(role, content) 构造器，id / turnId 为 null -->
+    <resultMap id="historyMessageBrief" type="com.example.smartflow.flow.HistoryMessage">
+        <constructor>
+            <arg column="role" javaType="string"/>
+            <arg column="content" javaType="string"/>
+        </constructor>
+    </resultMap>
+
+    <select id="findById" resultMap="sessionRow">
+        SELECT session_id, user_id, state::text AS state, turn_count
+        FROM flow_session
+        WHERE session_id = #{sessionId}
+    </select>
+
+    <!-- 会话不存在就创建；已存在且还没绑定用户时，补上 userId -->
+    <insert id="insertOrBindUser">
+        INSERT INTO flow_session (session_id, user_id, state, turn_count)
+        VALUES (#{sessionId}, #{userId}, CAST(#{stateJson} AS jsonb), 0)
+        ON CONFLICT (session_id) DO UPDATE SET user_id = COALESCE(flow_session.user_id, EXCLUDED.user_id)
+    </insert>
+
+    <update id="updateState">
+        UPDATE flow_session
+        SET state = CAST(#{stateJson} AS jsonb), turn_count = #{turnCount}, updated_at = now()
+        WHERE session_id = #{sessionId}
+    </update>
+
+    <select id="listRecent" resultType="java.util.LinkedHashMap">
+        SELECT session_id, user_id, turn_count, created_at, updated_at
+        FROM flow_session
+        ORDER BY updated_at DESC
+        LIMIT #{limit}
+    </select>
+
+    <!-- ============================================================ messages -->
+
+    <insert id="insertMessage">
+        INSERT INTO flow_message (session_id, turn_id, role, content, node_id)
+        VALUES (#{sessionId}, #{turnId}, #{role}, #{content}, #{nodeId})
+    </insert>
+
+    <select id="messagesAfterDesc" resultMap="historyMessage">
+        SELECT id, turn_id, role, content
+        FROM flow_message
+        WHERE session_id = #{sessionId} AND id &gt; #{afterId}
+        ORDER BY id DESC
+        LIMIT #{limit}
+    </select>
+
+    <select id="recentMessagesDesc" resultMap="historyMessageBrief">
+        SELECT role, content
+        FROM flow_message
+        WHERE session_id = #{sessionId}
+        ORDER BY id DESC
+        LIMIT #{limit}
+    </select>
+
+    <select id="listMessages" resultType="java.util.LinkedHashMap">
+        SELECT id, turn_id, role, content, node_id, created_at
+        FROM flow_message
+        WHERE session_id = #{sessionId}
+        ORDER BY id
+    </select>
+
+</mapper>

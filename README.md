@@ -1,6 +1,6 @@
 # smart-flow：智慧民生多节点对话工作流（最小闭环）
 
-Spring Boot 3.5 + LangChain4j 1.19 + LangGraph4j 1.8（LTS）+ PostgreSQL。
+Spring Boot 3.5 + LangChain4j 1.19 + LangGraph4j 1.8（LTS）+ MyBatis 3 + PostgreSQL。
 
 ## 已实现
 
@@ -48,10 +48,11 @@ config/      模型、图定义、配置项
 flow/        图状态 FlowState、任务帧 TaskFrame、路由结果、常量
 node/        AbstractNode 基类 + 各节点
 engine/      WorkflowEngine（每轮入口）、轮次上下文、推送事件
-session/     会话状态、消息存取
-trace/       轮次 / 节点 / 模型调用 / 工具调用 记录；ChatModelListener
+session/     会话状态、消息存取（SessionRepository → SessionMapper）
+trace/       轮次 / 节点 / 模型调用 / 工具调用 记录；ChatModelListener（TraceRepository → TraceMapper）
 web/         SSE 接口、调试查询接口
 resources/static/index.html   测试页面
+resources/mapper/*.xml        MyBatis SQL（Repository 只做 JSON 序列化等整理，SQL 都在这里）
 ```
 
 ## 一轮对话怎么跑

@@ -1,0 +1,152 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.example.smartflow.trace.TraceMapper">
+
+    <resultMap id="toolFact" type="com.example.smartflow.flow.ToolFact">
+        <constructor>
+            <arg column="turn_id" javaType="string"/>
+            <arg column="tool_name" javaType="string"/>
+            <arg column="arguments" javaType="string"/>
+            <arg column="result" javaType="string"/>
+        </constructor>
+    </resultMap>
+
+    <!-- ============================================================ turn -->
+
+    <insert id="insertTurn">
+        INSERT INTO flow_turn (turn_id, session_id, seq, user_input, state_before, status)
+        VALUES (#{turnId}, #{sessionId}, #{seq}, #{userInput}, CAST(#{stateBeforeJson} AS jsonb), 'RUNNING')
+    </insert>
+
+    <update id="finishTurn">
+        UPDATE flow_turn
+        SET final_reply  = #{finalReply},
+            route_action = #{routeAction},
+            route_target = #{routeTarget},
+            node_path    = CAST(#{nodePathJson} AS jsonb),
+            state_after  = CAST(#{stateAfterJson} AS jsonb),
+            status       = #{status},
+            error_msg    = #{errorMsg},
+            latency_ms   = #{latencyMs},
+            finished_at  = now()
+        WHERE turn_id = #{turnId}
+    </update>
+
+    <!-- ============================================================ node exec -->
+
+    <insert id="insertNodeExec">
+        INSERT INTO flow_node_exec (exec_id, turn_id, session_id, seq, node_id, node_type, input_state, status)
+        VALUES (#{execId}, #{turnId}, #{sessionId}, #{seq}, #{nodeId}, #{nodeType},
+                CAST(#{inputStateJson} AS jsonb), 'RUNNING')
+    </insert>
+
+    <update id="finishNodeExec">
+        UPDATE flow_node_exec
+        SET output_update = CAST(#{outputUpdateJson} AS jsonb),
+            status        = #{status},
+            error_msg     = #{errorMsg},
+            latency_ms    = #{latencyMs},
+            finished_at   = now()
+        WHERE exec_id = #{execId}
+    </update>
+
+    <!-- ============================================================ llm call -->
+
+    <insert id="insertLlmCall">
+        INSERT INTO flow_llm_call (call_id, turn_id, session_id, exec_id, node_id, purpose,
+                                   provider, model_name, streaming, request_body, status)
+        VALUES (#{callId}, #{turnId}, #{sessionId}, #{execId}, #{nodeId}, #{purpose},
+                #{provider}, #{modelName}, #{streaming}, CAST(#{requestBodyJson} AS jsonb), 'RUNNING')
+    </insert>
+
+    <update id="finishLlmCall">
+        UPDATE flow_llm_call
+        SET response_body = CAST(#{responseBodyJson} AS jsonb),
+            response_text = #{responseText},
+            input_tokens  = #{inputTokens},
+            output_tokens = #{outputTokens},
+            total_tokens  = #{totalTokens},
+            finish_reason = #{finishReason},
+            status        = #{status},
+            error_msg     = #{errorMsg},
+            latency_ms    = #{latencyMs},
+            finished_at   = now()
+        WHERE call_id = #{callId}
+    </update>
+
+    <!-- ============================================================ tool call -->
+
+    <insert id="insertToolCall">
+        INSERT INTO flow_tool_call (tool_call_id, turn_id, session_id, exec_id, llm_call_id,
+                                    node_id, tool_name, arguments, status)
+        VALUES (#{toolCallId}, #{turnId}, #{sessionId}, #{execId}, #{llmCallId},
+                #{nodeId}, #{toolName}, CAST(#{argumentsJson} AS jsonb), 'RUNNING')
+    </insert>
+
+    <update id="finishToolCall">
+        UPDATE flow_tool_call
+        SET result      = #{result},
+            status      = #{status},
+            error_msg   = #{errorMsg},
+            latency_ms  = #{latencyMs},
+            finished_at = now()
+        WHERE tool_call_id = #{toolCallId}
+    </update>
+
+    <!-- 指定轮次里成功的工具调用（不含内置的 ask_user），按时间正序 -->
+    <select id="listToolFacts" resultMap="toolFact">
+        SELECT turn_id, tool_name, arguments::text AS arguments, result
+        FROM flow_tool_call
+        WHERE session_id = #{sessionId}
+          AND status = 'SUCCESS'
+          AND tool_name &lt;&gt; 'ask_user'
+          AND turn_id IN
+          <foreach collection="turnIds" item="tid" open="(" separator="," close=")">#{tid}</foreach>
+        ORDER BY started_at
+    </select>
+
+    <!-- ============================================================ 查询（测试页面用） -->
+
+    <select id="listTurns" resultType="java.util.LinkedHashMap">
+        SELECT turn_id, seq, user_input, final_reply, route_action, route_target,
+               node_path::text AS node_path, status, error_msg, latency_ms, started_at
+        FROM flow_turn
+        WHERE session_id = #{sessionId}
+        ORDER BY seq
+    </select>
+
+    <select id="getTurn" resultType="java.util.LinkedHashMap">
+        SELECT turn_id, session_id, seq, user_input, final_reply, route_action, route_target,
+               node_path::text AS node_path, state_before::text AS state_before,
+               state_after::text AS state_after, status, error_msg, latency_ms, started_at
+        FROM flow_turn
+        WHERE turn_id = #{turnId}
+    </select>
+
+    <select id="listNodeExecs" resultType="java.util.LinkedHashMap">
+        SELECT exec_id, seq, node_id, node_type, input_state::text AS input_state,
+               output_update::text AS output_update, status, error_msg, latency_ms, started_at
+        FROM flow_node_exec
+        WHERE turn_id = #{turnId}
+        ORDER BY seq
+    </select>
+
+    <select id="listLlmCalls" resultType="java.util.LinkedHashMap">
+        SELECT call_id, exec_id, node_id, purpose, provider, model_name, streaming,
+               request_body::text AS request_body, response_body::text AS response_body,
+               response_text, input_tokens, output_tokens, total_tokens, finish_reason,
+               status, error_msg, latency_ms, started_at
+        FROM flow_llm_call
+        WHERE turn_id = #{turnId}
+        ORDER BY started_at
+    </select>
+
+    <select id="listToolCalls" resultType="java.util.LinkedHashMap">
+        SELECT tool_call_id, exec_id, llm_call_id, node_id, tool_name, arguments::text AS arguments,
+               result, status, error_msg, latency_ms, started_at
+        FROM flow_tool_call
+        WHERE turn_id = #{turnId}
+        ORDER BY started_at
+    </select>
+
+</mapper>

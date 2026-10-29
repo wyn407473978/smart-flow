@@ -22,6 +22,8 @@
         <!-- LangGraph4j 1.8.x 是 LTS 线；1.8.27 构建时使用的 LangChain4j 是 1.19.0，这里保持一致 -->
         <langgraph4j.version>1.8.27</langgraph4j.version>
         <langchain4j.version>1.19.0</langchain4j.version>
+        <!-- 3.0.5 的基线是 Spring Boot 3.5.x；4.x 是给 Spring Boot 4 用的 -->
+        <mybatis-spring-boot.version>3.0.5</mybatis-spring-boot.version>
     </properties>
 
     <dependencies>
@@ -29,9 +31,11 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-web</artifactId>
         </dependency>
+        <!-- 数据访问：MyBatis（自带 spring-boot-starter-jdbc 和 HikariCP） -->
         <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-jdbc</artifactId>
+            <groupId>org.mybatis.spring.boot</groupId>
+            <artifactId>mybatis-spring-boot-starter</artifactId>
+            <version>${mybatis-spring-boot.version}</version>
         </dependency>
         <dependency>
             <groupId>org.postgresql</groupId>

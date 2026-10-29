@@ -46,7 +46,6 @@ import dev.langchain4j.model.chat.response.ChatResponse;
 import dev.langchain4j.model.chat.response.StreamingChatResponseHandler;
 import dev.langchain4j.model.output.TokenUsage;
 import org.junit.jupiter.api.Test;
-import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -679,7 +678,7 @@ class WorkflowScenarioTest {
 
     /** 不落库，只校验写入的 JSON 合法，并记录模型调用 */
     private class FakeTrace extends TraceRepository {
-        FakeTrace() { super(new JdbcTemplate(), MAPPER); }
+        FakeTrace() { super(null, MAPPER); }
 
         @Override public void insertTurn(String turnId, String sessionId, int seq, String userInput, Object stateBefore) { json(stateBefore); }
         @Override public void finishTurn(String turnId, String reply, String a, String t, List<String> path, Object after,
@@ -745,7 +744,7 @@ class WorkflowScenarioTest {
         final Map<String, SummaryRecord> summaries = new HashMap<>();
         final Map<String, Map<String, String>> memories = new HashMap<>();
 
-        FakeMemoryRepository() { super(new JdbcTemplate()); }
+        FakeMemoryRepository() { super(null); }
 
         @Override public SummaryRecord findSummary(String sessionId) { return summaries.getOrDefault(sessionId, SummaryRecord.EMPTY); }
         @Override public void saveSummary(String sessionId, SummaryRecord record) { summaries.put(sessionId, record); }
@@ -776,7 +775,7 @@ class WorkflowScenarioTest {
         final Map<String, String> users = new HashMap<>();
         long nextId = 1;
 
-        FakeSessions() { super(new JdbcTemplate(), MAPPER); }
+        FakeSessions() { super(null, MAPPER); }
 
         @Override
         public void create(String id, String userId) {

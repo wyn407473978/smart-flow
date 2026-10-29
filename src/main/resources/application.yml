@@ -18,6 +18,14 @@ spring:
       schema-locations: classpath:db/schema.sql
       continue-on-error: false
 
+mybatis:
+  # Mapper 接口在各业务包里（session / memory / trace），用 @Mapper 标注，启动时自动扫描
+  mapper-locations: classpath:mapper/*.xml
+  configuration:
+    # 结果映射到 Map 时，值为 null 的列也保留 key，和原来 JdbcTemplate.queryForList 的返回一致（测试页依赖这些字段）
+    call-setters-on-nulls: true
+    default-statement-timeout: 30
+
 flow:
   model:
     # 任意 OpenAI 协议兼容端点。默认是阿里云百炼的兼容模式
@@ -58,3 +66,7 @@ flow:
 logging:
   level:
     com.example.smartflow: debug
+    # 想看 MyBatis 实际执行的 SQL 和参数时，把下面这些 Mapper 的级别改成 debug
+    com.example.smartflow.session.SessionMapper: info
+    com.example.smartflow.memory.MemoryMapper: info
+    com.example.smartflow.trace.TraceMapper: info

@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.example.smartflow.memory.MemoryMapper">
+
+    <resultMap id="summaryRecord" type="com.example.smartflow.memory.MemoryRepository$SummaryRecord">
+        <constructor>
+            <arg column="summary" javaType="string"/>
+            <arg column="up_to_message_id" javaType="_long"/>
+            <arg column="summarized_count" javaType="_int"/>
+        </constructor>
+    </resultMap>
+
+    <resultMap id="memoryFact" type="com.example.smartflow.flow.MemoryFact">
+        <constructor>
+            <arg column="id" javaType="long"/>
+            <arg column="memory_key" javaType="string"/>
+            <arg column="memory_value" javaType="string"/>
+            <arg column="updated_at_text" javaType="string"/>
+        </constructor>
+    </resultMap>
+
+    <!-- ============================================================ 滚动摘要 -->
+
+    <select id="findSummary" resultMap="summaryRecord">
+        SELECT summary, up_to_message_id, summarized_count
+        FROM flow_memory_summary
+        WHERE session_id = #{sessionId}
+    </select>
+
+    <insert id="upsertSummary">
+        INSERT INTO flow_memory_summary (session_id, summary, up_to_message_id, summarized_count, updated_at)
+        VALUES (#{sessionId}, #{r.summary}, #{r.upToMessageId}, #{r.summarizedCount}, now())
+        ON CONFLICT (session_id) DO UPDATE
+        SET summary = EXCLUDED.summary, up_to_message_id = EXCLUDED.up_to_message_id,
+            summarized_count = EXCLUDED.summarized_count, updated_at = now()
+    </insert>
+
+    <!-- ============================================================ 长期记忆 -->
+
+    <!-- updated_at 转成不带时区的本地时间文本，格式和原来 String.valueOf(Timestamp) 一致，例如 2026-10-30 00:10:00.123456。
+         别名不能叫 updated_at，否则 ORDER BY 会按这个文本列排序 -->
+    <select id="listUserMemories" resultMap="memoryFact">
+        SELECT id, memory_key, memory_value, updated_at::timestamp::text AS updated_at_text
+        FROM flow_user_memory
+        WHERE user_id = #{userId}
+        ORDER BY updated_at DESC
+        LIMIT #{limit}
+    </select>
+
+    <!-- 同一用户同一个 key 只保留一条，新值覆盖旧值 -->
+    <insert id="upsertUserMemory">
+        INSERT INTO flow_user_memory (user_id, memory_key, memory_value, source_session_id, source_turn_id)
+        VALUES (#{userId}, #{key}, #{value}, #{sessionId}, #{turnId})
+        ON CONFLICT (user_id, memory_key) DO UPDATE
+        SET memory_value = EXCLUDED.memory_value, source_session_id = EXCLUDED.source_session_id,
+            source_turn_id = EXCLUDED.source_turn_id, updated_at = now()
+    </insert>
+
+    <delete id="deleteUserMemoryByKey">
+        DELETE FROM flow_user_memory WHERE user_id = #{userId} AND memory_key = #{key}
+    </delete>
+
+    <delete id="deleteUserMemoryById">
+        DELETE FROM flow_user_memory WHERE user_id = #{userId} AND id = #{id}
+    </delete>
+
+    <select id="findSessionUser" resultType="string">
+        SELECT user_id FROM flow_session WHERE session_id = #{sessionId}
+    </select>
+
+</mapper>
