@@ -78,6 +78,15 @@ public abstract class AbstractNode implements NodeAction<FlowState> {
     }
 
     /**
+     * 本节点用到的提示词，给调试页面展示。key 是用途（和 flow_llm_call.purpose 对应），value 是提示词。
+     * 依赖注册信息的部分要按当前注册情况实时生成；只有运行时才知道的内容（用户输入、已收集信息等）用 {占位符} 表示。
+     * 不调用模型的节点返回空即可。
+     */
+    public Map<String, String> promptPreview() {
+        return Map.of();
+    }
+
+    /**
      * 节点业务逻辑。
      *
      * @return 对状态的更新（只放需要改变的 key）

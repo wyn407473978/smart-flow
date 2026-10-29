@@ -20,6 +20,7 @@ import com.example.smartflow.session.SessionRepository;
 import com.example.smartflow.session.SessionState;
 import com.example.smartflow.trace.TraceChatModelListener;
 import com.example.smartflow.trace.TraceRepository;
+import com.example.smartflow.web.NodeController;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.data.message.ChatMessage;
@@ -120,6 +121,16 @@ class WorkflowScenarioTest {
         String after = ((RouterNode) nodes.get(0)).systemPrompt();
         assertTrue(after.contains("- COMPLAINT（投诉建议）：用户要投诉、反映问题或提建议"), after);
         assertTrue(after.contains("「我要投诉物业」"), after);
+
+        // 调试接口：新节点挂在 router 下，且已经写进了 router 的提示词
+        Map<String, Object> view = new NodeController(catalog).nodes();
+        @SuppressWarnings("unchecked")
+        var children = (List<Map<String, Object>>) ((List<Map<String, Object>>) view.get("routers")).get(0).get("children");
+        var complaint = children.stream().filter(c -> "complaint".equals(c.get("nodeId"))).findFirst().orElseThrow();
+        assertEquals(true, complaint.get("inPrompt"));
+        assertEquals("ONE_SHOT", complaint.get("kind"));
+        assertTrue(children.stream().allMatch(c -> Boolean.TRUE.equals(c.get("inPrompt"))), "所有子节点都应出现在提示词中");
+        assertEquals(List.of("choose_template"), view.get("unattached"));
 
         // 任务进行中投诉 → 去新节点，算插话，回答完提示继续任务
         routerScript.add("{\"action\":\"START\",\"intent\":\"ACTIVITY_CREATE\",\"reason\":\"\"}");

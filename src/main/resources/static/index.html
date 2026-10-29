@@ -133,6 +133,29 @@
   .chatmsg.AI { border-left-color: var(--accent); }
   .stats { display: flex; flex-wrap: wrap; gap: 12px; font: 12px var(--mono); color: var(--muted); }
   details > summary { cursor: pointer; color: var(--muted); font-size: 12px; margin-top: 8px; }
+
+  /* ---------- 节点 / 提示词 ---------- */
+  .toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
+  .toolbar input { flex: 1; min-width: 160px; }
+  .reg { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .reg th, .reg td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  .reg th { font-weight: 500; color: var(--muted); font-size: 12px; }
+  .reg tr:last-child td { border-bottom: 0; }
+  .reg .tag, .reg td.mono { white-space: nowrap; }
+  .reg .ok { color: var(--accent); font-weight: 600; }
+  .reg .bad { color: var(--warn); font-weight: 600; }
+  .reg a { color: inherit; text-decoration: underline dotted; text-underline-offset: 3px; cursor: pointer; }
+  .reg .ex { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  .tablewrap { overflow-x: auto; }
+  .tag.task { color: var(--user); background: var(--user-soft); border-color: transparent; }
+  .tag.fb { color: var(--warn); background: var(--warn-soft); border-color: transparent; }
+  .prompt-hd { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
+  .prompt-hd:first-child { margin-top: 0; }
+  .prompt-hd .mono { color: var(--muted); }
+  .prompt-hd button { font-size: 11px; padding: 1px 8px; }
+  pre.prompt { max-height: 480px; }
+  pre.prompt mark { background: var(--accent-soft); color: var(--accent); border-radius: 3px; padding: 0 2px; }
+  .card.flash { outline: 2px solid var(--accent); outline-offset: 2px; transition: outline-color .8s; }
 </style>
 </head>
 <body>
@@ -161,11 +184,13 @@
       <button data-pane="paneTurn">轮次详情</button>
       <button data-pane="paneTurns">轮次列表</button>
       <button data-pane="paneState">会话状态</button>
+      <button data-pane="paneNodes">节点 / 提示词</button>
     </nav>
     <div class="pane on" id="paneLive"><div class="empty">发送消息后这里会实时显示节点流转、路由结果和 token</div></div>
     <div class="pane" id="paneTurn"><div class="empty">点击某条回复下方的轮次号，或在"轮次列表"里选择</div></div>
     <div class="pane" id="paneTurns"></div>
     <div class="pane" id="paneState"></div>
+    <div class="pane" id="paneNodes"><div class="empty">加载中…</div></div>
   </section>
 </div>
 
@@ -202,6 +227,8 @@
   function showPane(id) {
     document.querySelectorAll('#tabs button').forEach(x => x.classList.toggle('on', x.dataset.pane === id));
     document.querySelectorAll('.pane').forEach(x => x.classList.toggle('on', x.id === id));
+    // 每次切到这个页签都重新拉取，看到的永远是服务端当前注册的节点和提示词
+    if (id === 'paneNodes') loadNodes();
   }
 
   // ---------------------------------------------------------------- presets / composer
@@ -468,6 +495,120 @@
         <span class="mono muted">${t.latency_ms ?? '-'}ms</span><span class="tag ${t.status === 'SUCCESS' ? 'ok' : 'err'}">${esc(t.status)}</span>
       </div><div class="bd"><div class="label">参数</div><pre class="json">${esc(pretty(t.arguments))}</pre>
         <div class="label">结果</div><pre class="json">${esc(pretty(t.result ?? t.error_msg))}</pre></div></div>`;
+  }
+
+  // ---------------------------------------------------------------- nodes / prompts
+  const KIND = {
+    TASK_ENTRY: ['多轮任务入口', 'task'],
+    ONE_SHOT: ['一次性', ''],
+    FALLBACK: ['兜底', 'fb'],
+  };
+  let nodesData = null;
+  let nodesFilter = '';
+
+  async function loadNodes() {
+    const pane = $('paneNodes');
+    try {
+      const r = await fetch('/api/nodes');
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      nodesData = await r.json();
+      renderNodes();
+    } catch (e) {
+      pane.innerHTML = `<div class="empty">加载失败：${esc(e.message)}</div>`;
+    }
+  }
+
+  function renderNodes() {
+    const d = nodesData; if (!d) return;
+    const pane = $('paneNodes');
+    const kw = nodesFilter.trim().toLowerCase();
+
+    const routers = d.routers.map(r => {
+      const missing = r.children.filter(c => !c.inPrompt).length;
+      return `<div class="card"><div class="hd">
+          <b>${esc(r.id)}</b><span class="tag">ROUTER</span>
+          <span class="muted">已注册 ${r.children.length} 个子节点</span><span class="grow"></span>
+          ${missing ? `<span class="tag err">${missing} 个未出现在提示词中</span>` : '<span class="tag ok">全部已写入提示词</span>'}
+        </div><div class="bd tablewrap"><table class="reg">
+          <thead><tr><th></th><th>意图</th><th>类型</th><th>节点</th><th>描述 / 示例</th></tr></thead>
+          <tbody>${r.children.map(c => `<tr>
+            <td class="${c.inPrompt ? 'ok' : 'bad'}" title="${c.inPrompt ? '已出现在父节点提示词中' : '没有出现在父节点提示词中'}">${c.inPrompt ? '✓' : '✗'}</td>
+            <td class="mono">${esc(c.intent)}<div class="ex">${esc(c.name)} · order ${c.order}</div></td>
+            <td><span class="tag ${KIND[c.kind]?.[1] || ''}">${esc(KIND[c.kind]?.[0] || c.kind)}</span></td>
+            <td class="mono"><a data-goto="${esc(c.nodeId)}">${esc(c.nodeId)}</a></td>
+            <td>${esc(c.description)}${c.examples.length ? `<div class="ex">${c.examples.map(x => '「' + esc(x) + '」').join(' ')}</div>` : ''}</td>
+          </tr>`).join('')}</tbody></table></div></div>`;
+    }).join('');
+
+    const unattached = d.unattached.length
+      ? `<div class="card"><div class="hd"><b>任务后续阶段</b><span class="muted">不挂在路由下，由上一阶段推进过来</span></div>
+         <div class="bd path">${d.unattached.map(id => `<a class="node" data-goto="${esc(id)}" style="cursor:pointer">${esc(id)}</a>`).join('')}</div></div>`
+      : '';
+
+    // 路由提示词里把子节点的意图编码高亮出来
+    const intents = d.routers.flatMap(r => r.children.map(c => c.intent));
+    const highlight = (text, isRouter) => {
+      let html = esc(text);
+      if (isRouter) intents.forEach(i => { html = html.split('- ' + esc(i) + '（').join('- <mark>' + esc(i) + '</mark>（'); });
+      return html;
+    };
+
+    const nodes = d.nodes.filter(n => !kw
+        || n.id.toLowerCase().includes(kw)
+        || Object.values(n.prompts || {}).some(p => p.toLowerCase().includes(kw)));
+    const cards = nodes.map(n => {
+      const prompts = Object.entries(n.prompts || {});
+      const route = n.route
+        ? `<span class="tag">${esc(n.route.parent)} → ${esc(n.route.intent)}</span>`
+        : (n.router ? '' : '<span class="tag">不可被路由直接到达</span>');
+      return `<div class="card" id="node-${esc(n.id)}"><div class="hd click">
+          <b>${esc(n.id)}</b><span class="tag">${esc(n.type)}</span>${route}
+          <span class="grow"></span><span class="mono muted">${esc(n.className)}</span>
+        </div><div class="bd">
+          ${n.stageDescription ? `<div class="label">任务阶段说明（任务停在这里时会告诉路由模型）</div><div>${esc(n.stageDescription)}</div>` : ''}
+          ${prompts.length ? prompts.map(([k, v], i) => `
+            <div class="prompt-hd"><span class="mono">${esc(k)}</span><span class="grow"></span>
+              <button class="btn" data-copy="${esc(n.id)}" data-idx="${i}">复制</button></div>
+            <pre class="json prompt">${highlight(v, n.router && k.endsWith('system'))}</pre>`).join('')
+            : '<div class="muted">该节点不调用模型</div>'}
+        </div></div>`;
+    }).join('');
+
+    pane.innerHTML = `
+      <div class="toolbar">
+        <input type="text" id="nodeFilter" placeholder="按节点 id 或提示词内容过滤" value="${esc(nodesFilter)}">
+        <button class="btn" id="nodesRefresh">刷新</button>
+        <span class="mono muted">${esc(d.generatedAt.slice(11, 19))} 生成</span>
+      </div>
+      <div class="label">注册关系</div>${routers}${unattached}
+      <div class="label">节点与提示词（${nodes.length}/${d.nodes.length}）</div>${cards || '<div class="card"><div class="bd muted">没有匹配的节点</div></div>'}`;
+
+    $('nodesRefresh').onclick = loadNodes;
+    const input = $('nodeFilter');
+    input.oninput = e => {
+      nodesFilter = e.target.value;
+      const pos = e.target.selectionStart;
+      renderNodes();
+      const again = $('nodeFilter'); again.focus(); again.setSelectionRange(pos, pos);
+    };
+    pane.querySelectorAll('[data-goto]').forEach(a => a.onclick = () => {
+      const card = document.getElementById('node-' + a.dataset.goto);
+      if (!card) return;
+      card.classList.remove('collapsed');
+      card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      card.classList.add('flash'); setTimeout(() => card.classList.remove('flash'), 1200);
+    });
+    pane.querySelectorAll('[data-copy]').forEach(b => b.onclick = async () => {
+      const n = d.nodes.find(x => x.id === b.dataset.copy);
+      const text = Object.values(n.prompts)[+b.dataset.idx];
+      try { await navigator.clipboard.writeText(text); b.textContent = '已复制'; }
+      catch { b.textContent = '复制失败'; }
+      setTimeout(() => b.textContent = '复制', 1200);
+    });
+    pane.querySelectorAll('.hd.click').forEach(h => h.onclick = e => {
+      if (e.target.closest('a,button')) return;
+      h.parentElement.classList.toggle('collapsed');
+    });
   }
 
   // ---------------------------------------------------------------- init

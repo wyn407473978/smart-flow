@@ -15,6 +15,7 @@ import dev.langchain4j.data.message.ChatMessage;
 import dev.langchain4j.data.message.UserMessage;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -54,6 +55,14 @@ public abstract class IntentRouterNode extends AbstractNode {
             {"action": "CONTINUE|START|DIGRESS|CANCEL", "intent": "上面列出的模块编码之一", "reason": "一句话理由"}
             """;
 
+    private static final String USER_TEMPLATE = """
+            当前进行中的任务：%s
+
+            最近对话：
+            %s
+            用户本轮消息：%s
+            """;
+
     /** 模型的原始输出 */
     public record RouterOutput(Action action, String intent, String reason) {
     }
@@ -78,6 +87,16 @@ public abstract class IntentRouterNode extends AbstractNode {
         List<RouteOption> options = catalog.options(id());
         String intents = options.stream().map(IntentRouterNode::describe).collect(Collectors.joining("\n"));
         return PROMPT_TEMPLATE.formatted(assistantName(), intents, catalog.fallback(id()).spec().intent());
+    }
+
+    @Override
+    public Map<String, String> promptPreview() {
+        Map<String, String> prompts = new LinkedHashMap<>();
+        prompts.put("route · system", systemPrompt());
+        prompts.put("route · user", USER_TEMPLATE.formatted(
+                "{任务名（任务类型）}\n当前阶段：{阶段说明}\n已收集信息：{槽位}　　← 没有进行中的任务时这三行是：（无）",
+                "{最近 6 条对话}", "{用户本轮消息}"));
+        return prompts;
     }
 
     private static String describe(RouteOption o) {
@@ -131,13 +150,7 @@ public abstract class IntentRouterNode extends AbstractNode {
                     stage.isBlank() ? t.getCurrentNode() : stage, t.getSlots());
         }).orElse("（无）");
 
-        String userContent = """
-                当前进行中的任务：%s
-
-                最近对话：
-                %s
-                用户本轮消息：%s
-                """.formatted(taskDesc, historyAsText(state, 6), state.userInput());
+        String userContent = USER_TEMPLATE.formatted(taskDesc, historyAsText(state, 6), state.userInput());
 
         List<ChatMessage> messages = List.of(system(systemPrompt()), UserMessage.from(userContent));
         try {

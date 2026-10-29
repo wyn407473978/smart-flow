@@ -9,6 +9,7 @@ import dev.langchain4j.data.message.UserMessage;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -60,25 +61,44 @@ public class ChatNode extends AbstractNode {
     }
 
     @Override
+    public Map<String, String> promptPreview() {
+        Map<String, String> prompts = new LinkedHashMap<>();
+        prompts.put("reply · system", systemPrompt("", null));
+        prompts.put("reply · system（任务进行中插话时）", systemPrompt("{早期对话摘要，没有则不出现}", "{任务名}"));
+        return prompts;
+    }
+
+    @Override
     protected Map<String, Object> execute(FlowState state, NodeScope scope) throws Exception {
+        String sys = systemPrompt(state.summary(),
+                state.activeTask().map(t -> catalog.taskName(t.getTaskType())).orElse(null));
+
+        List<ChatMessage> messages = new ArrayList<>();
+        messages.add(system(sys));
+        messages.addAll(historyMessages(state, support.props().memory().recentMessages()));
+        messages.add(UserMessage.from(state.userInput()));
+
+        String text = streamReply(scope, "reply", messages);
+        return reply(text);
+    }
+
+    /**
+     * @param summary        早期对话摘要，可以为空
+     * @param activeTaskName 进行中任务的名字，没有任务时为 null
+     */
+    private String systemPrompt(String summary, String activeTaskName) {
         // 能力清单也来自子节点声明，新增节点后闲聊节点自动"知道"
         String abilities = catalog.options(FlowNames.ROUTER).stream()
                 .filter(o -> !o.spec().fallback())
                 .map(o -> o.spec().name())
                 .collect(Collectors.joining("、"));
         StringBuilder sys = new StringBuilder(SYSTEM_PROMPT.formatted(abilities.isEmpty() ? "（暂无）" : abilities));
-        if (!state.summary().isBlank()) {
-            sys.append("\n早期对话摘要：").append(state.summary()).append('\n');
+        if (summary != null && !summary.isBlank()) {
+            sys.append("\n早期对话摘要：").append(summary).append('\n');
         }
-        state.activeTask().ifPresent(t ->
-                sys.append('\n').append(HAS_ACTIVE_TASK.formatted(catalog.taskName(t.getTaskType()))));
-
-        List<ChatMessage> messages = new ArrayList<>();
-        messages.add(system(sys.toString()));
-        messages.addAll(historyMessages(state, support.props().memory().recentMessages()));
-        messages.add(UserMessage.from(state.userInput()));
-
-        String text = streamReply(scope, "reply", messages);
-        return reply(text);
+        if (activeTaskName != null) {
+            sys.append('\n').append(HAS_ACTIVE_TASK.formatted(activeTaskName));
+        }
+        return sys.toString();
     }
 }

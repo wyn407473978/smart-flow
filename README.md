@@ -105,6 +105,11 @@ public class ComplaintNode extends AbstractNode {
 2. 返回值里只放要更新的状态 key；回复放 `FlowState.REPLIES`
 3. 放进状态的对象必须实现 `Serializable`（LangGraph4j 在节点间会克隆状态）；从状态取出的 `TaskFrame` 先 `copy()` 再改
 
+**怎么确认子节点注册成功**：打开测试页面的「节点 / 提示词」页签（接口 `GET /api/nodes`）。
+- 「注册关系」表列出每个路由节点下挂了哪些子节点，✓ 表示该子节点的意图已经出现在父节点的提示词里
+- 下面是每个节点当前实际使用的提示词，路由提示词里子节点的意图编码会高亮；每次切换到这个页签或点「刷新」都会重新生成
+- 节点通过覆盖 `promptPreview()` 暴露自己的提示词，运行时才知道的内容用 `{占位符}` 表示
+
 以后某个分支下子节点多了需要二级路由（例如 B1 下有多种任务），继承 `IntentRouterNode` 换个 id，子节点把 `parent` 指向它即可，同样不用改提示词。
 
 ## 记录了什么
