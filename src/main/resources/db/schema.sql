@@ -141,3 +141,36 @@ CREATE INDEX IF NOT EXISTS idx_flow_tool_call_turn ON flow_tool_call (turn_id, s
 CREATE INDEX IF NOT EXISTS idx_flow_tool_call_exec ON flow_tool_call (exec_id);
 
 COMMENT ON TABLE flow_tool_call IS '工具调用记录';
+
+-- ---------------------------------------------------------------------
+-- 7. 滚动摘要：每个会话一行。up_to_message_id 之前（含）的消息已经压缩进 summary，
+--    每轮只需要读 id > up_to_message_id 的消息原文
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS flow_memory_summary (
+    session_id        VARCHAR(64)  PRIMARY KEY,
+    summary           TEXT         NOT NULL,
+    up_to_message_id  BIGINT       NOT NULL DEFAULT 0,
+    summarized_count  INT          NOT NULL DEFAULT 0,   -- 累计压缩了多少条消息
+    updated_at        TIMESTAMPTZ  NOT NULL DEFAULT now()
+);
+
+COMMENT ON TABLE  flow_memory_summary                  IS '会话滚动摘要';
+COMMENT ON COLUMN flow_memory_summary.up_to_message_id IS '已压缩进摘要的最后一条 flow_message.id';
+
+-- ---------------------------------------------------------------------
+-- 8. 长期记忆：按用户保存的稳定信息，跨会话生效。同一用户同一个 key 只保留一条（新值覆盖旧值）
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS flow_user_memory (
+    id                BIGSERIAL    PRIMARY KEY,
+    user_id           VARCHAR(64)  NOT NULL,
+    memory_key        VARCHAR(64)  NOT NULL,                -- 例如：常住城市、称呼
+    memory_value      TEXT         NOT NULL,
+    source_session_id VARCHAR(64),
+    source_turn_id    VARCHAR(64),
+    created_at        TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    updated_at        TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    CONSTRAINT uk_flow_user_memory UNIQUE (user_id, memory_key)
+);
+CREATE INDEX IF NOT EXISTS idx_flow_user_memory_user ON flow_user_memory (user_id, updated_at DESC);
+
+COMMENT ON TABLE flow_user_memory IS '用户长期记忆';

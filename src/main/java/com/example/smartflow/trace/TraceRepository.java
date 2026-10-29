@@ -1,10 +1,14 @@
 package com.example.smartflow.trace;
 
+import com.example.smartflow.flow.ToolFact;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
@@ -105,6 +109,28 @@ public class TraceRepository {
                 SET result = ?, status = ?, error_msg = ?, latency_ms = ?, finished_at = now()
                 WHERE tool_call_id = ?
                 """, result, status, errorMsg, latencyMs, toolCallId);
+    }
+
+    /**
+     * 指定轮次里成功的工具调用（不含内置的 ask_user），按时间正序。给记忆用：节点可以把最近查到的数据带进提示词。
+     */
+    public List<ToolFact> listToolFacts(String sessionId, Collection<String> turnIds) {
+        if (turnIds == null || turnIds.isEmpty()) {
+            return List.of();
+        }
+        List<String> ids = List.copyOf(turnIds);
+        String placeholders = String.join(",", Collections.nCopies(ids.size(), "?"));
+        List<Object> args = new ArrayList<>();
+        args.add(sessionId);
+        args.addAll(ids);
+        return jdbc.query("""
+                        SELECT turn_id, tool_name, arguments::text AS arguments, result FROM flow_tool_call
+                        WHERE session_id = ? AND status = 'SUCCESS' AND tool_name <> 'ask_user'
+                          AND turn_id IN (%s)
+                        ORDER BY started_at
+                        """.formatted(placeholders),
+                (rs, i) -> new ToolFact(rs.getString(1), rs.getString(2), rs.getString(3), rs.getString(4)),
+                args.toArray());
     }
 
     // ------------------------------------------------------------------ 查询（测试页面用）

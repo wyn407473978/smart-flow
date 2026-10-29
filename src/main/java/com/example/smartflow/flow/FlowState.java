@@ -23,11 +23,17 @@ public class FlowState extends AgentState {
     public static final String SESSION_ID = "sessionId";
     public static final String TURN_ID = "turnId";
     public static final String USER_INPUT = "userInput";
+    /** 可以为空：没有用户标识时不启用长期记忆 */
+    public static final String USER_ID = "userId";
 
     // ---- 跨轮数据（来自数据库）----
     /** List&lt;HistoryMessage&gt;，不含本轮用户输入 */
     public static final String HISTORY = "history";
     public static final String SUMMARY = "summary";
+    /** List&lt;ToolFact&gt;，历史窗口覆盖的轮次里成功的工具调用 */
+    public static final String TOOL_FACTS = "toolFacts";
+    /** List&lt;MemoryFact&gt;，用户长期记忆 */
+    public static final String USER_MEMORY = "userMemory";
     /** List&lt;TaskFrame&gt;，最后一个元素是栈顶 */
     public static final String TASK_STACK = "taskStack";
 
@@ -68,6 +74,18 @@ public class FlowState extends AgentState {
 
     public String summary() {
         return this.<String>value(SUMMARY).orElse("");
+    }
+
+    public String userId() {
+        return this.<String>value(USER_ID).orElse(null);
+    }
+
+    public List<ToolFact> toolFacts() {
+        return this.<List<ToolFact>>value(TOOL_FACTS).orElse(List.of());
+    }
+
+    public List<MemoryFact> userMemory() {
+        return this.<List<MemoryFact>>value(USER_MEMORY).orElse(List.of());
     }
 
     public List<TaskFrame> taskStack() {

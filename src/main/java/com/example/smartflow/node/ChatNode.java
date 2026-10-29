@@ -65,18 +65,19 @@ public class ChatNode extends AbstractNode {
     public Map<String, String> promptPreview() {
         Map<String, String> prompts = new LinkedHashMap<>();
         prompts.put("reply · system", systemPrompt("", null));
-        prompts.put("reply · system（任务进行中插话时）", systemPrompt("{早期对话摘要，没有则不出现}", "{任务名}"));
+        prompts.put("reply · system（有记忆、任务进行中插话时）",
+                systemPrompt("\n{记忆块：长期记忆 / 早期对话摘要，没有则不出现}\n", "{任务名}"));
         return prompts;
     }
 
     @Override
     protected Map<String, Object> execute(FlowState state, NodeScope scope) throws Exception {
-        String sys = systemPrompt(state.summary(),
+        String sys = systemPrompt(memoryBlock(state),
                 state.activeTask().map(t -> catalog.taskName(t.getTaskType())).orElse(null));
 
         List<ChatMessage> messages = new ArrayList<>();
         messages.add(system(sys));
-        messages.addAll(historyMessages(state, support.props().memory().recentMessages()));
+        messages.addAll(historyMessages(state));
         messages.add(UserMessage.from(state.userInput()));
 
         String text = streamReply(scope, "reply", messages);
@@ -84,18 +85,18 @@ public class ChatNode extends AbstractNode {
     }
 
     /**
-     * @param summary        早期对话摘要，可以为空
+     * @param memory         记忆块（长期记忆、早期对话摘要），可以为空
      * @param activeTaskName 进行中任务的名字，没有任务时为 null
      */
-    private String systemPrompt(String summary, String activeTaskName) {
+    private String systemPrompt(String memory, String activeTaskName) {
         // 能力清单也来自子节点声明，新增节点后闲聊节点自动"知道"
         String abilities = catalog.options(FlowNames.ROUTER).stream()
                 .filter(o -> !o.spec().fallback())
                 .map(o -> o.spec().name())
                 .collect(Collectors.joining("、"));
         StringBuilder sys = new StringBuilder(SYSTEM_PROMPT.formatted(abilities.isEmpty() ? "（暂无）" : abilities));
-        if (summary != null && !summary.isBlank()) {
-            sys.append("\n早期对话摘要：").append(summary).append('\n');
+        if (memory != null && !memory.isBlank()) {
+            sys.append(memory);
         }
         if (activeTaskName != null) {
             sys.append('\n').append(HAS_ACTIVE_TASK.formatted(activeTaskName));

@@ -27,13 +27,31 @@ flow:
     chat-model: deepseek-flash
     # 路由用的轻量模型（每轮都要调用，选便宜、快的）
     router-model: deepseek-flash
+    # 后台记忆任务（滚动摘要、长期记忆抽取）用的模型，不配置时用 router-model
+    # memory-model: deepseek-flash
     temperature: 0.3
     timeout-seconds: 60
     # 打开后会在日志里打印发给模型的 HTTP 报文，排查兼容性问题时用
     log-http: false
   memory:
-    # 每轮带给模型的最近消息条数（user + assistant 各算一条）
+    # 节点默认带多少条历史消息（user + assistant 各算一条），节点可以通过 historyPolicy() 覆盖
     recent-messages: 12
+    # 节点默认历史消息的 token 上限（估算），和条数限制同时生效
+    max-history-tokens: 3000
+    # 每轮最多从库里读多少条还没被摘要的消息
+    load-messages: 60
+    summary:
+      enabled: true
+      # 未摘要的消息超过这么多条时，后台把较早的部分压缩进摘要
+      trigger-messages: 24
+      # 压缩时保留最近多少条原文不动（必须小于 trigger-messages）
+      keep-recent: 12
+      # 摘要最多多少字
+      max-chars: 400
+    long-term:
+      # 按用户保存稳定信息，跨会话生效；请求里没有 userId 时不启用
+      enabled: true
+      max-items: 50
   sse:
     timeout-seconds: 180
 

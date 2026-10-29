@@ -2,12 +2,13 @@ package com.example.smartflow.node;
 
 import com.example.smartflow.config.FlowProperties;
 import com.example.smartflow.engine.TurnRegistry;
+import com.example.smartflow.llm.LlmJson;
 import com.example.smartflow.llm.ModelRegistry;
+import com.example.smartflow.memory.SimpleTokenEstimator;
+import com.example.smartflow.memory.TokenEstimator;
 import com.example.smartflow.trace.TraceRepository;
-import com.fasterxml.jackson.databind.DeserializationFeature;
-import com.fasterxml.jackson.databind.MapperFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.json.JsonMapper;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 /**
@@ -21,27 +22,32 @@ public class NodeSupport {
     private final TurnRegistry turns;
     private final ObjectMapper mapper;
     private final FlowProperties props;
+    private final TokenEstimator tokenEstimator;
 
-    /** 专门解析模型输出的 JSON：枚举大小写不敏感、多余字段忽略、未知枚举值当 null */
-    private final ObjectMapper llmJsonMapper = JsonMapper.builder()
-            .enable(MapperFeature.ACCEPT_CASE_INSENSITIVE_ENUMS)
-            .disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
-            .enable(DeserializationFeature.READ_UNKNOWN_ENUM_VALUES_AS_NULL)
-            .build();
 
+    @Autowired
     public NodeSupport(ModelRegistry models, TraceRepository trace, TurnRegistry turns,
-                       ObjectMapper mapper, FlowProperties props) {
+                       ObjectMapper mapper, FlowProperties props, TokenEstimator tokenEstimator) {
         this.models = models;
         this.trace = trace;
         this.turns = turns;
         this.mapper = mapper;
         this.props = props;
+        this.tokenEstimator = tokenEstimator;
+    }
+
+    /** 测试或非 Spring 环境：使用默认的 token 估算 */
+    public NodeSupport(ModelRegistry models, TraceRepository trace, TurnRegistry turns,
+                       ObjectMapper mapper, FlowProperties props) {
+        this(models, trace, turns, mapper, props, new SimpleTokenEstimator());
     }
 
     public ModelRegistry models() { return models; }
     public TraceRepository trace() { return trace; }
     public TurnRegistry turns() { return turns; }
     public ObjectMapper mapper() { return mapper; }
-    public ObjectMapper llmJsonMapper() { return llmJsonMapper; }
+    /** 专门解析模型输出的 JSON：枚举大小写不敏感、多余字段忽略、未知枚举值当 null */
+    public ObjectMapper llmJsonMapper() { return LlmJson.MAPPER; }
     public FlowProperties props() { return props; }
+    public TokenEstimator tokenEstimator() { return tokenEstimator; }
 }

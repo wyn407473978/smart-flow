@@ -47,7 +47,10 @@ public class ChatController {
         this.props = props;
     }
 
-    public record ChatRequestBody(String sessionId, String message) {
+    /**
+     * @param userId 可选。带上它才会启用长期记忆；会话第一次带上时绑定，之后不传也沿用
+     */
+    public record ChatRequestBody(String sessionId, String message, String userId) {
         void validate() {
             if (sessionId == null || sessionId.isBlank() || message == null || message.isBlank()) {
                 throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "sessionId 和 message 不能为空");
@@ -66,7 +69,7 @@ public class ChatController {
 
         executor.submit(() -> {
             try {
-                engine.handle(body.sessionId(), body.message(), event -> send(emitter, event, clientGone));
+                engine.handle(body.sessionId(), body.userId(), body.message(), event -> send(emitter, event, clientGone));
             } catch (TurnFailedException e) {
                 // error 事件已经由引擎推送过
             } catch (Exception e) {
@@ -83,7 +86,7 @@ public class ChatController {
     @PostMapping("/chat")
     public TurnResult chat(@RequestBody ChatRequestBody body) {
         body.validate();
-        return engine.handle(body.sessionId(), body.message(), event -> { });
+        return engine.handle(body.sessionId(), body.userId(), body.message(), event -> { });
     }
 
     // ------------------------------------------------------------------ 调试查询
@@ -102,6 +105,7 @@ public class ChatController {
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("sessionId", sessionId);
         out.put("turnCount", record.get().turnCount());
+        out.put("userId", record.get().userId());
         out.put("state", record.get().state());
         out.put("messages", sessions.listMessages(sessionId));
         out.put("turns", trace.listTurns(sessionId));

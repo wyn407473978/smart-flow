@@ -78,10 +78,17 @@ public class BizQueryNode extends AbstractNode {
                 20));
     }
 
+    /** 查询类节点带上最近的工具调用结果，用户追问"那明天呢""换成北京呢"时模型能看到上一轮查到的数据 */
+    @Override
+    public HistoryPolicy historyPolicy() {
+        return super.historyPolicy().withToolResults(true);
+    }
+
     @Override
     public Map<String, String> promptPreview() {
         Map<String, String> prompts = new LinkedHashMap<>();
-        prompts.put("answer · system", systemPrompt(null));
+        prompts.put("answer · system", systemPrompt(null)
+                + "\n{记忆块：长期记忆 / 早期对话摘要 / 最近查询到的数据，没有则不出现}");
         prompts.put("answer · tools", describeTools(tools));
         return prompts;
     }
@@ -91,8 +98,8 @@ public class BizQueryNode extends AbstractNode {
         String taskName = state.activeTask().map(t -> catalog.taskName(t.getTaskType())).orElse(null);
 
         List<ChatMessage> messages = new ArrayList<>();
-        messages.add(system(systemPrompt(taskName)));
-        messages.addAll(historyMessages(state, support.props().memory().recentMessages()));
+        messages.add(system(systemPrompt(taskName) + memoryBlock(state)));
+        messages.addAll(historyMessages(state));
         messages.add(UserMessage.from(state.userInput()));
 
         ToolLoopResult result = streamWithTools(scope, "answer", messages, tools, MAX_TOOL_ROUNDS);

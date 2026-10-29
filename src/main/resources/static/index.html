@@ -49,6 +49,12 @@
   }
   header.bar h1 { font-size: 14px; margin: 0 8px 0 0; letter-spacing: .02em; white-space: nowrap; }
   header.bar select { flex: 1; min-width: 0; }
+  header.bar input { width: 120px; flex-shrink: 0; }
+  .mem-row { display: flex; gap: 10px; align-items: baseline; padding: 6px 0; border-bottom: 1px dashed var(--line); }
+  .mem-row:last-child { border-bottom: 0; }
+  .mem-row .k { width: 96px; flex-shrink: 0; color: var(--muted); }
+  .mem-row .v { flex: 1; word-break: break-word; }
+  .mem-row button { font-size: 11px; padding: 1px 8px; }
   .btn {
     border: 1px solid var(--line); background: var(--panel); border-radius: 6px;
     padding: 5px 10px; cursor: pointer; white-space: nowrap;
@@ -82,7 +88,7 @@
   .tabs { display: flex; gap: 2px; padding: 0 10px; background: var(--panel); border-bottom: 1px solid var(--line); }
   .tabs button {
     border: 0; background: none; padding: 11px 12px; cursor: pointer; color: var(--muted);
-    border-bottom: 2px solid transparent;
+    border-bottom: 2px solid transparent; white-space: nowrap; flex-shrink: 0;
   }
   .tabs button.on { color: var(--ink); border-bottom-color: var(--accent); }
   .pane { flex: 1; overflow-y: auto; padding: 14px; display: none; }
@@ -167,6 +173,7 @@
     <header class="bar">
       <h1>工作流调试台</h1>
       <select id="sessionSelect" title="历史会话"></select>
+      <input type="text" id="userId" placeholder="用户 ID（可选）" title="带上用户 ID 才会启用长期记忆，换会话也能记住">
       <button class="btn" id="newSessionBtn">新会话</button>
     </header>
     <div class="messages" id="messages"><div class="empty">发一条消息开始测试</div></div>
@@ -244,6 +251,8 @@
   $('input').addEventListener('keydown', e => {
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send($('input').value); }
   });
+  $('userId').value = store.get('flow.userId') || '';
+  $('userId').onchange = e => store.set('flow.userId', e.target.value.trim());
   $('newSessionBtn').onclick = () => { sessionId = newId(); store.set('flow.sessionId', sessionId); loadSessions(); loadSession(); };
   $('sessionSelect').onchange = e => { sessionId = e.target.value; store.set('flow.sessionId', sessionId); loadSession(); };
 
@@ -292,7 +301,7 @@
       const resp = await fetch('/api/chat/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
-        body: JSON.stringify({ sessionId, message: text }),
+        body: JSON.stringify({ sessionId, message: text, userId: $('userId').value.trim() || null }),
       });
       if (!resp.ok || !resp.body) throw new Error('HTTP ' + resp.status + ' ' + (await resp.text()).slice(0, 200));
       const reader = resp.body.getReader();
@@ -412,7 +421,36 @@
         : `<div class="label">已收集槽位</div><pre class="json">${esc(pretty(t.slots))}</pre>`}</div></div>`).join('')
       : '<div class="card"><div class="bd muted">任务栈为空</div></div>';
     pane.innerHTML = `<div class="label">任务栈（${stack.length}）</div>${tasks}
+      <div id="memoryBox"></div>
       <details><summary>完整会话状态 JSON</summary><pre class="json">${esc(pretty(state))}</pre></details>`;
+    loadMemory();
+  }
+
+  // 记忆是后台任务写的，本轮刚结束时可能还没写完，所以 done 之后稍等再拉一次
+  async function loadMemory(retry = true) {
+    const box = $('memoryBox'); if (!box) return;
+    try {
+      const r = await fetch('/api/sessions/' + encodeURIComponent(sessionId) + '/memory');
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const m = await r.json();
+      const mems = m.userMemories || [];
+      box.innerHTML = `
+        <div class="label">早期对话摘要${m.summarizedCount ? `（已压缩 ${m.summarizedCount} 条消息，到消息 #${m.upToMessageId}）` : ''}</div>
+        <div class="card"><div class="bd">${m.summary ? `<div style="white-space:pre-wrap">${esc(m.summary)}</div>`
+          : '<span class="muted">还没有摘要。对话超过 flow.memory.summary.trigger-messages 条后，后台会把较早的部分压缩进来</span>'}</div></div>
+        <div class="label">长期记忆${m.userId ? `（用户 ${esc(m.userId)}，${mems.length} 条）` : ''}</div>
+        <div class="card"><div class="bd">${!m.userId ? '<span class="muted">这个会话没有用户 ID，不启用长期记忆。在顶部填上用户 ID 后新开会话即可</span>'
+          : mems.length ? mems.map(f => `<div class="mem-row"><span class="k">${esc(f.key)}</span><span class="v">${esc(f.value)}</span>
+              <button class="btn" data-del="${f.id}">删除</button></div>`).join('')
+          : '<span class="muted">还没有记住任何信息</span>'}</div></div>`;
+      box.querySelectorAll('[data-del]').forEach(b => b.onclick = async () => {
+        await fetch(`/api/users/${encodeURIComponent(m.userId)}/memories/${b.dataset.del}`, { method: 'DELETE' });
+        loadMemory(false);
+      });
+      if (retry) setTimeout(() => loadMemory(false), 2500);
+    } catch (e) {
+      box.innerHTML = `<div class="muted">记忆加载失败：${esc(e.message)}</div>`;
+    }
   }
 
   function renderTurns(turns) {
@@ -461,7 +499,10 @@
         <details><summary>执行后状态</summary><pre class="json">${esc(pretty(turn.state_after))}</pre></details>
       </div></div>
       <div class="label">节点执行（${nodes.length}）</div>
-      ${nodes.map(n => nodeCard(n, callsByExec[n.exec_id] || [], toolsByExec[n.exec_id] || [])).join('')}`;
+      ${nodes.map(n => nodeCard(n, callsByExec[n.exec_id] || [], toolsByExec[n.exec_id] || [])).join('')}
+      ${(callsByExec['null'] || []).length
+        ? `<div class="label">后台记忆任务（本轮结束后异步执行：滚动摘要 / 长期记忆抽取）</div>`
+          + callsByExec['null'].map(llmCard).join('') : ''}`;
 
     pane.querySelectorAll('.hd.click').forEach(h => h.onclick = () => h.parentElement.classList.toggle('collapsed'));
   }

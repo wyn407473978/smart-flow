@@ -5,6 +5,13 @@ import com.example.smartflow.config.GraphConfig;
 import com.example.smartflow.flow.FlowNames;
 import com.example.smartflow.flow.FlowState;
 import com.example.smartflow.flow.HistoryMessage;
+import com.example.smartflow.flow.MemoryFact;
+import com.example.smartflow.flow.ToolFact;
+import com.example.smartflow.memory.ConversationSummarizer;
+import com.example.smartflow.memory.LongTermMemoryExtractor;
+import com.example.smartflow.memory.MemoryRepository;
+import com.example.smartflow.memory.MemoryRepository.SummaryRecord;
+import com.example.smartflow.memory.MemoryService;
 import com.example.smartflow.llm.ModelRegistry;
 import com.example.smartflow.node.AbstractNode;
 import com.example.smartflow.node.BizQueryNode;
@@ -68,9 +75,17 @@ class WorkflowScenarioTest {
     private final Deque<String> extractScript = new ArrayDeque<>();
     private final List<String> llmCalls = new ArrayList<>();
     private final FakeSessions sessions = new FakeSessions();
+    private final FakeMemoryRepository memoryRepo = new FakeMemoryRepository();
+    /** 后台记忆任务（摘要 / 长期记忆）的模型输出脚本，没有脚本时摘要返回空、抽取返回空数组 */
+    private final Deque<String> summaryScript = new ArrayDeque<>();
+    private final Deque<String> memoryScript = new ArrayDeque<>();
+    /** 各节点收到的系统提示词，按节点区分：chat / biz / ask */
+    private final Map<String, List<String>> systemPrompts = new java.util.concurrent.ConcurrentHashMap<>();
     private final List<String> routerPrompts = new ArrayList<>();
     private final Deque<String> toolScript = new ArrayDeque<>();
     private final List<String> routerInputs = new ArrayList<>();
+    /** 后台记忆任务收到的用户消息（摘要的输入对话、抽取的本轮对话） */
+    private final List<String> backgroundInputs = new ArrayList<>();
     /** 业务查询节点最终回答末尾追加的内容，用来模拟模型不听话、自己提醒继续任务 */
     private String finalSuffix = "";
     /** 业务查询节点收到的系统提示词 */
@@ -79,32 +94,44 @@ class WorkflowScenarioTest {
     /** toolCallId → [工具名, 参数, 发起它的模型调用(节点/用途), 状态, 结果] */
     private final Map<String, List<String>> toolCalls = new java.util.LinkedHashMap<>();
 
-    private final FlowProperties props = new FlowProperties(
+    private FlowProperties props = new FlowProperties(
             new FlowProperties.Model("http://stub", "stub", "chat", "router", 0.3, 5, false),
             new FlowProperties.Memory(12), new FlowProperties.Sse(180));
     private final FakeTrace trace = new FakeTrace();
     private final TurnRegistry turns = new TurnRegistry();
-    private final NodeSupport support;
+    private NodeSupport support;
     /** 和 Spring 一样：节点列表就是"注册了哪些节点"，路由目录和图都从它生成 */
     private final List<AbstractNode> nodes = new ArrayList<>();
     private final RouteCatalog catalog = new RouteCatalog(() -> nodes);
     private WorkflowEngine engine;
 
+    private final ModelRegistry models;
+
     WorkflowScenarioTest() throws Exception {
         TraceChatModelListener listener = new TraceChatModelListener(trace, MAPPER);
-        ModelRegistry models = new ModelRegistry(
+        models = new ModelRegistry(
                 new ScriptedChatModel(List.of(listener)),
                 new ScriptedChatModel(List.of(listener)),
                 new StubStreamingModel(List.of(listener)));
+        useMemoryConfig(new FlowProperties.Memory(12));
+    }
+
+    /** 用指定的记忆配置重建节点和引擎（测试摘要阈值、token 上限时用） */
+    private void useMemoryConfig(FlowProperties.Memory memoryConfig) throws Exception {
+        props = new FlowProperties(props.model(), memoryConfig, props.sse());
         support = new NodeSupport(models, trace, turns, MAPPER, props);
+        nodes.clear();
         nodes.addAll(List.of(new RouterNode(support, catalog), new ChatNode(support, catalog),
                 new CollectTargetNode(support), new ChooseTemplatePlaceholderNode(support),
                 new BizQueryNode(support, catalog, new WeatherTool(MAPPER), new UserInfoTool(MAPPER))));
+        catalog.refresh();
         rebuild();
     }
 
     private void rebuild() throws Exception {
-        engine = new WorkflowEngine(GraphConfig.build(nodes, catalog), sessions, trace, turns, props, catalog);
+        MemoryService memory = new MemoryService(sessions, trace, memoryRepo, new ConversationSummarizer(),
+                new LongTermMemoryExtractor(), support.models(), props, Runnable::run);
+        engine = new WorkflowEngine(GraphConfig.build(nodes, catalog), sessions, trace, turns, props, catalog, memory);
     }
 
     // =====================================================================
@@ -335,6 +362,141 @@ class WorkflowScenarioTest {
         assertTrue(tools.contains("get_weather") && tools.contains("city（必填）") && tools.contains("get_user_info"), tools);
     }
 
+    // =====================================================================
+    // 记忆：滚动摘要 / token 窗口 / 工具结果 / 长期记忆
+    // =====================================================================
+
+    private static final String CHAT_START = "{\"action\":\"START\",\"intent\":\"CHAT\",\"reason\":\"闲聊\"}";
+
+    private static String last(List<String> list) {
+        return list.get(list.size() - 1);
+    }
+
+    @Test
+    void rollingSummaryFoldsOldMessagesInBackground() throws Exception {
+        // 未摘要的消息超过 6 条时，压缩到只剩最近 2 条
+        useMemoryConfig(new FlowProperties.Memory(12, 3000, 60,
+                new FlowProperties.Summary(true, 6, 2, 100), null));
+
+        for (int i = 1; i <= 3; i++) {
+            routerScript.add(CHAT_START);
+            turn("m1", "第" + i + "句", List.of("router", "chat"), null);
+        }
+        // 3 轮 = 6 条消息，没超过阈值，不摘要
+        assertTrue(backgroundInputs.isEmpty(), "还不应该触发摘要: " + backgroundInputs);
+
+        routerScript.add(CHAT_START);
+        summaryScript.add("用户和助手闲聊了三句。");
+        turn("m1", "第4句", List.of("router", "chat"), null);
+        // 第 4 轮结束后 8 条消息 > 6：把最早的 6 条（前 3 轮）压缩进摘要
+        assertTrue(last(backgroundInputs).contains("用户：第1句") && last(backgroundInputs).contains("用户：第3句")
+                && !last(backgroundInputs).contains("第4句"), last(backgroundInputs));
+        SummaryRecord summary = memoryRepo.findSummary("m1");
+        assertEquals("用户和助手闲聊了三句。", summary.summary());
+        assertEquals(6L, summary.upToMessageId());
+        assertEquals(6, summary.summarizedCount());
+
+        // 下一轮：节点拿到摘要，历史里只剩摘要之后的原文
+        routerScript.add(CHAT_START);
+        turn("m1", "第5句", List.of("router", "chat"), null);
+        String chatSys = last(systemPrompts.get("chat"));
+        assertTrue(chatSys.contains("【早期对话摘要】\n用户和助手闲聊了三句。"), chatSys);
+        assertTrue(last(routerInputs).contains("用户和助手闲聊了三句。"), "路由也应带上摘要");
+        assertTrue(last(routerInputs).contains("用户：第4句") && !last(routerInputs).contains("第3句"), last(routerInputs));
+    }
+
+    @Test
+    void emptySummaryDoesNotAdvance() throws Exception {
+        useMemoryConfig(new FlowProperties.Memory(12, 3000, 60,
+                new FlowProperties.Summary(true, 2, 0, 100), null));
+        routerScript.add(CHAT_START);
+        turn("m2", "你好", List.of("router", "chat"), null);
+        routerScript.add(CHAT_START);
+        turn("m2", "在吗", List.of("router", "chat"), null);
+        // 摘要模型返回空（脚本为空）：不推进摘要位置，下次再试
+        assertEquals(0L, memoryRepo.findSummary("m2").upToMessageId());
+    }
+
+    /** 直接调用 AbstractNode.window 验证按条数 + token 截断 */
+    static class WindowProbe extends AbstractNode {
+        WindowProbe(NodeSupport s) { super(s); }
+        @Override public String id() { return "probe"; }
+        @Override public NodeType type() { return NodeType.CHAT; }
+        @Override protected Map<String, Object> execute(FlowState state, NodeScope scope) { return Map.of(); }
+        List<String> windowOf(List<String> contents, int limit) {
+            List<HistoryMessage> h = contents.stream().map(c -> new HistoryMessage("user", c)).toList();
+            return window(new FlowState(Map.of(FlowState.HISTORY, h)), limit).stream().map(HistoryMessage::content).toList();
+        }
+    }
+
+    @Test
+    void historyWindowRespectsTokenBudget() throws Exception {
+        useMemoryConfig(new FlowProperties.Memory(12, 10, 60, null, null));
+        var probe = new WindowProbe(support);
+        List<String> h = List.of("一二三四五六", "七八九十", "甲乙丙");   // 6 / 4 / 3 token
+
+        assertEquals(List.of("七八九十", "甲乙丙"), probe.windowOf(h, 12));   // 3+4=7，再加 6 超过 10
+        assertEquals(List.of("甲乙丙"), probe.windowOf(h, 1));               // 条数限制
+        useMemoryConfig(new FlowProperties.Memory(12, 2, 60, null, null));
+        assertEquals(List.of("甲乙丙"), new WindowProbe(support).windowOf(h, 12)); // 最新一条超了也保留
+    }
+
+    @Test
+    void toolResultsAreRememberedForQueryNode() {
+        routerScript.add("{\"action\":\"START\",\"intent\":\"BIZ_QUERY\",\"reason\":\"\"}");
+        toolScript.add("get_weather:{\"city\":\"杭州\"}");
+        turn("m3", "杭州今天天气怎么样", List.of("router", "biz_query"), null);
+        assertFalse(last(bizPrompts).contains("【最近查询到的数据】"), "第一轮还没有历史数据");
+
+        routerScript.add("{\"action\":\"START\",\"intent\":\"BIZ_QUERY\",\"reason\":\"追问\"}");
+        toolScript.add("get_weather:{\"city\":\"杭州\",\"date\":\"2026-10-31\"}");
+        turn("m3", "那明天呢", List.of("router", "biz_query"), null);
+        String biz = last(bizPrompts);
+        assertTrue(biz.contains("【最近查询到的数据】") && biz.contains("get_weather({\"city\":\"杭州\"}) → {"), biz);
+
+        // 闲聊节点默认不带工具结果
+        routerScript.add(CHAT_START);
+        turn("m3", "谢谢", List.of("router", "chat"), null);
+        assertFalse(last(systemPrompts.get("chat")).contains("【最近查询到的数据】"));
+    }
+
+    @Test
+    void longTermMemoryIsExtractedAndUsedAcrossSessions() {
+        routerScript.add(CHAT_START);
+        memoryScript.add("{\"upserts\":[{\"key\":\"常住城市\",\"value\":\"杭州\"},{\"key\":\"称呼\",\"value\":\"小王\"},"
+                + "{\"key\":\"\",\"value\":\"空 key 应被丢弃\"}],\"deletes\":[]}");
+        turnAs("u1", "s-a", "我住在杭州，以后叫我小王", List.of("router", "chat"), null);
+        assertEquals(Map.of("常住城市", "杭州", "称呼", "小王"), memoryRepo.memories.get("u1"));
+        assertTrue(last(backgroundInputs).contains("用户：我住在杭州，以后叫我小王"), last(backgroundInputs));
+
+        // 换一个会话，同一个用户：节点提示词里带上长期记忆，路由不带
+        routerScript.add(CHAT_START);
+        memoryScript.add("{\"upserts\":[],\"deletes\":[\"称呼\"]}");
+        turnAs("u1", "s-b", "你好", List.of("router", "chat"), null);
+        String chatSys = last(systemPrompts.get("chat"));
+        assertTrue(chatSys.contains("【关于用户的长期信息】") && chatSys.contains("- 常住城市：杭州"), chatSys);
+        assertFalse(last(routerInputs).contains("常住城市"), "路由不需要长期记忆");
+        // 本轮抽取删除了"称呼"
+        assertEquals(Map.of("常住城市", "杭州"), memoryRepo.memories.get("u1"));
+    }
+
+    @Test
+    void sessionKeepsBoundUserAndNoUserMeansNoLongTermMemory() {
+        // 会话第一次带 userId 绑定，之后不传也沿用
+        routerScript.add(CHAT_START);
+        memoryScript.add("{\"upserts\":[{\"key\":\"常住城市\",\"value\":\"北京\"}]}");
+        turnAs("u2", "s-c", "我在北京", List.of("router", "chat"), null);
+        routerScript.add(CHAT_START);
+        turn("s-c", "你好", List.of("router", "chat"), null);
+        assertTrue(last(systemPrompts.get("chat")).contains("- 常住城市：北京"), last(systemPrompts.get("chat")));
+
+        // 从来没有 userId 的会话：不抽取长期记忆
+        int before = backgroundInputs.size();
+        routerScript.add(CHAT_START);
+        turn("s-d", "我在上海", List.of("router", "chat"), null);
+        assertEquals(before, backgroundInputs.size());
+    }
+
     @Test
     void unknownIntentGoesToFallback() {
         routerScript.add("{\"action\":\"START\",\"intent\":\"NOT_EXIST\",\"reason\":\"\"}");
@@ -403,9 +565,14 @@ class WorkflowScenarioTest {
     // ------------------------------------------------------------------ helpers
 
     private WorkflowEngine.TurnResult turn(String sid, String input, List<String> expectedPath, String expectedNode) {
+        return turnAs(null, sid, input, expectedPath, expectedNode);
+    }
+
+    private WorkflowEngine.TurnResult turnAs(String userId, String sid, String input,
+                                             List<String> expectedPath, String expectedNode) {
         StringBuilder streamed = new StringBuilder();
         List<String> events = new ArrayList<>();
-        var res = engine.handle(sid, input, e -> {
+        var res = engine.handle(sid, userId, input, e -> {
             events.add(e.type());
             if (e.type().equals("token")) {
                 streamed.append(e.data().get("text"));
@@ -445,7 +612,13 @@ class WorkflowScenarioTest {
                 routerInputs.add(((UserMessage) request.messages().get(request.messages().size() - 1)).singleText());
             }
             String out = sys.contains("路由模块") ? routerScript.pop()
-                    : sys.contains("信息抽取模块") ? extractScript.pop() : "{}";
+                    : sys.contains("信息抽取模块") ? extractScript.pop()
+                    : sys.contains("对话摘要模块") ? (summaryScript.isEmpty() ? "" : summaryScript.pop())
+                    : sys.contains("长期记忆模块") ? (memoryScript.isEmpty() ? "{\"upserts\":[],\"deletes\":[]}" : memoryScript.pop())
+                    : "{}";
+            if (sys.contains("对话摘要模块") || sys.contains("长期记忆模块")) {
+                backgroundInputs.add(((UserMessage) request.messages().get(request.messages().size() - 1)).singleText());
+            }
             return ChatResponse.builder().aiMessage(AiMessage.from(out)).tokenUsage(new TokenUsage(10, 5)).build();
         }
     }
@@ -467,8 +640,11 @@ class WorkflowScenarioTest {
         @Override
         public void doChat(ChatRequest request, StreamingChatResponseHandler handler) {
             new Thread(() -> {
-                if (systemText(request).contains("业务查询模块")) {
-                    bizPrompts.add(systemText(request));
+                String sysText = systemText(request);
+                String who = sysText.contains("业务查询模块") ? "biz" : sysText.contains("正在帮用户创建活动") ? "ask" : "chat";
+                systemPrompts.computeIfAbsent(who, k -> new java.util.concurrent.CopyOnWriteArrayList<>()).add(sysText);
+                if (sysText.contains("业务查询模块")) {
+                    bizPrompts.add(sysText);
                     List<String> results = request.messages().stream()
                             .filter(m -> m instanceof ToolExecutionResultMessage)
                             .map(m -> ((ToolExecutionResultMessage) m).text()).toList();
@@ -517,7 +693,7 @@ class WorkflowScenarioTest {
                                   String provider, String modelName, boolean streaming, String requestBodyJson) {
             llmCalls.add(nodeId + "/" + purpose);
             llmCallIds.put(callId, nodeId + "/" + purpose);
-            assertTrue(execId != null, "模型调用应关联到节点执行");
+            assertTrue(execId != null || MemoryService.TRACE_NODE_ID.equals(nodeId), "模型调用应关联到节点执行");
             readTree(requestBodyJson);
         }
 
@@ -533,6 +709,21 @@ class WorkflowScenarioTest {
                                    String nodeId, String toolName, String argumentsJson) {
             readTree(argumentsJson);
             toolCalls.put(toolCallId, new ArrayList<>(List.of(toolName, argumentsJson, String.valueOf(llmCallIds.get(llmCallId)))));
+            toolTurns.put(toolCallId, turnId);
+        }
+
+        final Map<String, String> toolTurns = new java.util.concurrent.ConcurrentHashMap<>();
+
+        @Override
+        public List<ToolFact> listToolFacts(String sessionId, java.util.Collection<String> turnIds) {
+            List<ToolFact> out = new ArrayList<>();
+            toolCalls.forEach((id, c) -> {
+                String turnId = toolTurns.get(id);
+                if (turnIds.contains(turnId) && c.size() >= 5 && "SUCCESS".equals(c.get(3)) && !"ask_user".equals(c.get(0))) {
+                    out.add(new ToolFact(turnId, c.get(0), c.get(1), c.get(4)));
+                }
+            });
+            return out;
         }
 
         @Override
@@ -549,11 +740,41 @@ class WorkflowScenarioTest {
         }
     }
 
+    /** 内存版记忆存储 */
+    private static class FakeMemoryRepository extends MemoryRepository {
+        final Map<String, SummaryRecord> summaries = new HashMap<>();
+        final Map<String, Map<String, String>> memories = new HashMap<>();
+
+        FakeMemoryRepository() { super(new JdbcTemplate()); }
+
+        @Override public SummaryRecord findSummary(String sessionId) { return summaries.getOrDefault(sessionId, SummaryRecord.EMPTY); }
+        @Override public void saveSummary(String sessionId, SummaryRecord record) { summaries.put(sessionId, record); }
+
+        @Override
+        public List<MemoryFact> listUserMemories(String userId, int limit) {
+            List<MemoryFact> out = new ArrayList<>();
+            memories.getOrDefault(userId, Map.of()).forEach((k, v) -> out.add(new MemoryFact((long) out.size() + 1, k, v, "")));
+            return out.subList(0, Math.min(limit, out.size()));
+        }
+
+        @Override
+        public void upsertUserMemory(String userId, String key, String value, String sessionId, String turnId) {
+            memories.computeIfAbsent(userId, k -> new java.util.LinkedHashMap<>()).put(key, value);
+        }
+
+        @Override
+        public void deleteUserMemoryByKey(String userId, String key) {
+            memories.getOrDefault(userId, new HashMap<>()).remove(key);
+        }
+    }
+
     /** 内存版会话存储；状态经过 JSON 往返，模拟 JSONB */
     private static class FakeSessions extends SessionRepository {
         final Map<String, String> states = new HashMap<>();
         final Map<String, Integer> counts = new HashMap<>();
         final Map<String, List<HistoryMessage>> messages = new HashMap<>();
+        final Map<String, String> users = new HashMap<>();
+        long nextId = 1;
 
         FakeSessions() { super(new JdbcTemplate(), MAPPER); }
 
@@ -562,12 +783,15 @@ class WorkflowScenarioTest {
             states.putIfAbsent(id, toJson(new SessionState()));
             counts.putIfAbsent(id, 0);
             messages.putIfAbsent(id, new ArrayList<>());
+            if (userId != null) {
+                users.putIfAbsent(id, userId);
+            }
         }
 
         @Override
         public Optional<SessionRecord> find(String id) {
             try {
-                return Optional.of(new SessionRecord(id, null, MAPPER.readValue(states.get(id), SessionState.class), counts.get(id)));
+                return Optional.of(new SessionRecord(id, users.get(id), MAPPER.readValue(states.get(id), SessionState.class), counts.get(id)));
             } catch (Exception e) {
                 throw new RuntimeException(e);
             }
@@ -581,7 +805,13 @@ class WorkflowScenarioTest {
 
         @Override
         public void insertMessage(String id, String turnId, String role, String content, String nodeId) {
-            messages.get(id).add(new HistoryMessage(role, content));
+            messages.get(id).add(new HistoryMessage(role, content, nextId++, turnId));
+        }
+
+        @Override
+        public List<HistoryMessage> messagesAfter(String id, long afterId, int limit) {
+            List<HistoryMessage> after = messages.getOrDefault(id, List.of()).stream().filter(m -> m.id() > afterId).toList();
+            return new ArrayList<>(after.subList(Math.max(0, after.size() - limit), after.size()));
         }
 
         @Override

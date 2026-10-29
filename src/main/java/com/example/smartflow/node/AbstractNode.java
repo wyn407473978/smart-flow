@@ -5,7 +5,11 @@ import com.example.smartflow.engine.TurnEvent;
 import com.example.smartflow.flow.FlowNames;
 import com.example.smartflow.flow.FlowState;
 import com.example.smartflow.flow.HistoryMessage;
+import com.example.smartflow.flow.MemoryFact;
+import com.example.smartflow.flow.ToolFact;
+import com.example.smartflow.memory.TokenEstimator;
 import com.example.smartflow.flow.TaskFrame;
+import com.example.smartflow.llm.LlmJson;
 import com.example.smartflow.node.route.RouteSpec;
 import com.example.smartflow.tool.FlowTool;
 import com.example.smartflow.trace.TraceKeys;
@@ -29,10 +33,12 @@ import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
@@ -486,26 +492,111 @@ public abstract class AbstractNode implements NodeAction<FlowState> {
     // 消息与状态辅助
     // =====================================================================
 
-    /** 把短期记忆转换成 LangChain4j 消息，最多取最近 limit 条 */
+    // ------------------------------------------------------------------ 记忆
+
+    /** 工具结果放进提示词时每条最多保留的字数，避免一次查询返回大段数据把上下文撑爆 */
+    private static final int TOOL_RESULT_MAX_CHARS = 500;
+
+    /**
+     * 本节点要带多少记忆。默认值来自 flow.memory 配置：带摘要和长期记忆，不带工具结果。
+     * 子类按需覆盖，例如路由只要最近几条、查询类节点要带工具结果：
+     * <pre>
+     * return super.historyPolicy().withMaxMessages(6).withToolResults(true);
+     * </pre>
+     */
+    public HistoryPolicy historyPolicy() {
+        var m = support.props().memory();
+        return new HistoryPolicy(m.recentMessages(), m.maxHistoryTokens(), true, true, false);
+    }
+
+    /** 按 {@link #historyPolicy()} 取历史消息，转换成 LangChain4j 消息 */
+    protected List<ChatMessage> historyMessages(FlowState state) {
+        return toChatMessages(window(state, historyPolicy().maxMessages()));
+    }
+
+    /** 最多取最近 limit 条（同时受 token 上限约束） */
     protected List<ChatMessage> historyMessages(FlowState state, int limit) {
+        return toChatMessages(window(state, limit));
+    }
+
+    /** 历史消息渲染成纯文本，放进路由、抽取这类提示词里 */
+    protected String historyAsText(FlowState state, int limit) {
+        StringBuilder sb = new StringBuilder();
+        for (HistoryMessage m : window(state, limit)) {
+            sb.append(m.isUser() ? "用户：" : "助手：").append(m.content()).append('\n');
+        }
+        return sb.isEmpty() ? "（无）" : sb.toString();
+    }
+
+    /**
+     * 历史窗口：从最新的消息往前取，条数不超过 limit，token 不超过 historyPolicy().maxTokens()。
+     * 至少保留最近一条（哪怕它自己就超了 token 上限），否则模型连上一句话都看不到。
+     */
+    protected List<HistoryMessage> window(FlowState state, int limit) {
         List<HistoryMessage> history = state.history();
-        int from = Math.max(0, history.size() - limit);
+        int budget = historyPolicy().maxTokens();
+        TokenEstimator estimator = support.tokenEstimator();
+        int used = 0;
+        int from = history.size();
+        while (from > 0 && history.size() - from < limit) {
+            int cost = estimator.estimate(history.get(from - 1).content());
+            if (from < history.size() && used + cost > budget) {
+                break;
+            }
+            used += cost;
+            from--;
+        }
+        return history.subList(from, history.size());
+    }
+
+    private static List<ChatMessage> toChatMessages(List<HistoryMessage> messages) {
         List<ChatMessage> out = new ArrayList<>();
-        for (HistoryMessage m : history.subList(from, history.size())) {
+        for (HistoryMessage m : messages) {
             out.add(m.isUser() ? UserMessage.from(m.content()) : AiMessage.from(m.content()));
         }
         return out;
     }
 
-    /** 历史消息渲染成纯文本，放进路由、抽取这类提示词里 */
-    protected String historyAsText(FlowState state, int limit) {
-        List<HistoryMessage> history = state.history();
-        int from = Math.max(0, history.size() - limit);
+    /**
+     * 记忆块：按 {@link #historyPolicy()} 拼出 长期记忆 / 早期对话摘要 / 最近查询到的数据，追加到节点的系统提示词后面。
+     * 什么都没有时返回空字符串。
+     */
+    protected String memoryBlock(FlowState state) {
+        HistoryPolicy p = historyPolicy();
         StringBuilder sb = new StringBuilder();
-        for (HistoryMessage m : history.subList(from, history.size())) {
-            sb.append(m.isUser() ? "用户：" : "助手：").append(m.content()).append('\n');
+        if (p.includeUserMemory() && !state.userMemory().isEmpty()) {
+            sb.append("\n【关于用户的长期信息】（来自以往的对话，可能已经变化；和本轮对话冲突时以本轮为准，不要主动复述这些信息）\n");
+            for (MemoryFact f : state.userMemory()) {
+                sb.append("- ").append(f.key()).append("：").append(f.value()).append('\n');
+            }
         }
-        return sb.isEmpty() ? "（无）" : sb.toString();
+        if (p.includeSummary() && !state.summary().isBlank()) {
+            sb.append("\n【早期对话摘要】\n").append(state.summary().strip()).append('\n');
+        }
+        if (p.includeToolResults()) {
+            Set<String> inWindow = new HashSet<>();
+            for (HistoryMessage m : window(state, p.maxMessages())) {
+                if (m.turnId() != null) {
+                    inWindow.add(m.turnId());
+                }
+            }
+            List<ToolFact> facts = state.toolFacts().stream().filter(f -> inWindow.contains(f.turnId())).toList();
+            if (!facts.isEmpty()) {
+                sb.append("\n【最近查询到的数据】（之前的对话里查到的，用户追问时可以直接引用；需要新的数据时再调用工具）\n");
+                for (ToolFact f : facts) {
+                    sb.append("- ").append(f.toolName()).append('(').append(f.arguments() == null ? "" : f.arguments())
+                            .append(") → ").append(truncate(f.result(), TOOL_RESULT_MAX_CHARS)).append('\n');
+                }
+            }
+        }
+        return sb.toString();
+    }
+
+    private static String truncate(String s, int max) {
+        if (s == null) {
+            return "";
+        }
+        return s.length() <= max ? s : s.substring(0, max) + "…（已截断）";
     }
 
     protected static SystemMessage system(String text) {
@@ -531,18 +622,7 @@ public abstract class AbstractNode implements NodeAction<FlowState> {
     }
 
     private static String stripCodeFence(String text) {
-        if (text == null) {
-            return "";
-        }
-        String t = text.strip();
-        if (t.startsWith("```")) {
-            int firstNewline = t.indexOf('\n');
-            int lastFence = t.lastIndexOf("```");
-            if (firstNewline > 0 && lastFence > firstNewline) {
-                t = t.substring(firstNewline + 1, lastFence).strip();
-            }
-        }
-        return t;
+        return LlmJson.stripCodeFence(text);
     }
 
     private static long elapsedMs(long startNanos) {

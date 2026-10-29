@@ -38,11 +38,12 @@ public class SessionRepository {
         return rows.stream().findFirst();
     }
 
+    /** 会话不存在就创建；已存在且还没绑定用户时，补上 userId */
     public void create(String sessionId, String userId) {
         jdbc.update("""
                 INSERT INTO flow_session (session_id, user_id, state, turn_count)
                 VALUES (?, ?, ?::jsonb, 0)
-                ON CONFLICT (session_id) DO NOTHING
+                ON CONFLICT (session_id) DO UPDATE SET user_id = COALESCE(flow_session.user_id, EXCLUDED.user_id)
                 """, sessionId, userId, toJson(new SessionState()));
     }
 
@@ -67,6 +68,23 @@ public class SessionRepository {
                 INSERT INTO flow_message (session_id, turn_id, role, content, node_id)
                 VALUES (?, ?, ?, ?, ?)
                 """, sessionId, turnId, role, content, nodeId);
+    }
+
+    /**
+     * id 大于 afterId 的消息里最新的 limit 条，按时间正序返回。
+     * 滚动摘要把 afterId 之前的消息压缩掉了，所以每轮只需要读它之后的原文。
+     */
+    public List<HistoryMessage> messagesAfter(String sessionId, long afterId, int limit) {
+        List<HistoryMessage> desc = jdbc.query("""
+                        SELECT id, turn_id, role, content FROM flow_message
+                        WHERE session_id = ? AND id > ? ORDER BY id DESC LIMIT ?
+                        """,
+                (rs, i) -> new HistoryMessage(rs.getString("role"), rs.getString("content"),
+                        rs.getLong("id"), rs.getString("turn_id")),
+                sessionId, afterId, limit);
+        List<HistoryMessage> asc = new ArrayList<>(desc);
+        Collections.reverse(asc);
+        return asc;
     }
 
     /** 最近 n 条消息，按时间正序返回 */

@@ -5,6 +5,7 @@ import com.example.smartflow.flow.FlowState;
 import com.example.smartflow.flow.HistoryMessage;
 import com.example.smartflow.flow.RouteDecision;
 import com.example.smartflow.flow.TaskFrame;
+import com.example.smartflow.memory.MemoryService;
 import com.example.smartflow.node.route.RouteCatalog;
 import com.example.smartflow.session.SessionRepository;
 import com.example.smartflow.session.SessionRepository.SessionRecord;
@@ -40,6 +41,7 @@ public class WorkflowEngine {
     private final TurnRegistry turns;
     private final FlowProperties props;
     private final RouteCatalog catalog;
+    private final MemoryService memory;
 
     /**
      * 会话锁：同一会话同一时间只处理一条消息。
@@ -48,8 +50,9 @@ public class WorkflowEngine {
     private final Map<String, ReentrantLock> sessionLocks = new ConcurrentHashMap<>();
 
     public WorkflowEngine(CompiledGraph<FlowState> graph, SessionRepository sessions, TraceRepository trace,
-                          TurnRegistry turns, FlowProperties props, RouteCatalog catalog) {
+                          TurnRegistry turns, FlowProperties props, RouteCatalog catalog, MemoryService memory) {
         this.catalog = catalog;
+        this.memory = memory;
         this.graph = graph;
         this.sessions = sessions;
         this.trace = trace;
@@ -60,35 +63,43 @@ public class WorkflowEngine {
     public record TurnResult(String turnId, String reply, List<String> nodePath, SessionState state) {
     }
 
+    /** 没有用户标识的调用（不启用长期记忆） */
+    public TurnResult handle(String sessionId, String userInput, Consumer<TurnEvent> sink) {
+        return handle(sessionId, null, userInput, sink);
+    }
+
     /**
      * 处理一条用户消息。阻塞直到本轮结束，过程中的事件通过 sink 推出去。
+     *
+     * @param userId 用户标识，可以为空；会话第一次带上 userId 时绑定，之后不传也会沿用会话绑定的用户
      */
-    public TurnResult handle(String sessionId, String userInput, Consumer<TurnEvent> sink) {
+    public TurnResult handle(String sessionId, String userId, String userInput, Consumer<TurnEvent> sink) {
         ReentrantLock lock = sessionLocks.computeIfAbsent(sessionId, k -> new ReentrantLock());
         if (!lock.tryLock()) {
             throw new IllegalStateException("该会话上一条消息还在处理中，请稍后再发");
         }
         try {
-            return doHandle(sessionId, userInput, sink);
+            return doHandle(sessionId, userId, userInput, sink);
         } finally {
             lock.unlock();
         }
     }
 
-    private TurnResult doHandle(String sessionId, String userInput, Consumer<TurnEvent> sink) {
+    private TurnResult doHandle(String sessionId, String requestUserId, String userInput, Consumer<TurnEvent> sink) {
         long start = System.nanoTime();
 
         // 1. 加载会话
-        sessions.create(sessionId, null);
+        sessions.create(sessionId, blankToNull(requestUserId));
         SessionRecord session = sessions.find(sessionId).orElseThrow();
         SessionState before = session.state();
+        String userId = blankToNull(session.userId()) != null ? session.userId() : blankToNull(requestUserId);
         int seq = session.turnCount() + 1;
 
         String turnId = UUID.randomUUID().toString();
         trace.insertTurn(turnId, sessionId, seq, userInput, before);
 
-        // 2. 短期记忆：先读历史，再写入本轮用户消息（历史里不含本轮输入）
-        List<HistoryMessage> history = sessions.recentMessages(sessionId, props.memory().recentMessages());
+        // 2. 记忆：摘要 + 摘要之后的对话原文 + 其中的工具结果 + 长期记忆。先读再写入本轮用户消息（历史里不含本轮输入）
+        MemoryService.MemoryContext mem = memory.load(sessionId, userId);
         sessions.insertMessage(sessionId, turnId, HistoryMessage.USER, userInput, null);
 
         TurnContext ctx = new TurnContext(sessionId, turnId, sink);
@@ -101,8 +112,13 @@ public class WorkflowEngine {
             input.put(FlowState.SESSION_ID, sessionId);
             input.put(FlowState.TURN_ID, turnId);
             input.put(FlowState.USER_INPUT, userInput);
-            input.put(FlowState.HISTORY, new ArrayList<>(history));
-            input.put(FlowState.SUMMARY, before.getSummary());
+            if (userId != null) {
+                input.put(FlowState.USER_ID, userId);
+            }
+            input.put(FlowState.HISTORY, new ArrayList<>(mem.history()));
+            input.put(FlowState.SUMMARY, mem.summary());
+            input.put(FlowState.TOOL_FACTS, new ArrayList<>(mem.toolFacts()));
+            input.put(FlowState.USER_MEMORY, new ArrayList<>(mem.userMemories()));
             input.put(FlowState.TASK_STACK, new ArrayList<>(before.getTaskStack()));
 
             FlowState finalState = null;
@@ -125,7 +141,6 @@ public class WorkflowEngine {
             // 5. 保存
             SessionState after = new SessionState();
             after.setTaskStack(openTasks(finalState.taskStack()));
-            after.setSummary(finalState.summary());
             sessions.save(sessionId, after, seq);
             if (!reply.isBlank()) {
                 List<String> path = ctx.nodePath();
@@ -142,6 +157,9 @@ public class WorkflowEngine {
 
             ctx.emit(TurnEvent.of("done", "turnId", turnId, "reply", reply,
                     "nodePath", ctx.nodePath(), "state", after, "latencyMs", ms));
+
+            // 6. 后台记忆任务（滚动摘要、长期记忆抽取），不占用户等待时间
+            memory.afterTurn(sessionId, userId, turnId, userInput, reply);
             return new TurnResult(turnId, reply, ctx.nodePath(), after);
 
         } catch (Exception e) {
@@ -181,6 +199,10 @@ public class WorkflowEngine {
     /** 回复里同时提到了任务名和"继续"，就认为节点已经自己提醒过了 */
     static boolean alreadyReminded(String reply, String taskName) {
         return reply != null && reply.contains(taskName) && reply.contains("继续");
+    }
+
+    private static String blankToNull(String s) {
+        return s == null || s.isBlank() ? null : s;
     }
 
     private static List<TaskFrame> openTasks(List<TaskFrame> stack) {

@@ -88,6 +88,12 @@ public class CollectTargetNode extends AbstractNode {
                 10));
     }
 
+    /** 追问时只需要最近几轮；带上长期记忆（例如用户常住的社区），可以帮用户提建议 */
+    @Override
+    public HistoryPolicy historyPolicy() {
+        return super.historyPolicy().withMaxMessages(6);
+    }
+
     @Override
     public String stageDescription() {
         return "收集活动的目标人群（年龄范围、性别、目标区域或社区）";
@@ -261,8 +267,8 @@ public class CollectTargetNode extends AbstractNode {
                 errorLine);
 
         List<ChatMessage> messages = new ArrayList<>();
-        messages.add(system(sys));
-        messages.addAll(historyMessages(state, 6));
+        messages.add(system(sys + memoryBlock(state)));
+        messages.addAll(historyMessages(state));
         messages.add(UserMessage.from(state.userInput()));
         return streamReply(scope, "ask_missing", messages);
     }

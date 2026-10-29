@@ -36,8 +36,10 @@ open http://localhost:8080/
 
 ```bash
 curl -s localhost:8080/api/chat -H 'Content-Type: application/json' \
-  -d '{"sessionId":"s1","message":"我想办一个活动"}'
+  -d '{"sessionId":"s1","message":"我想办一个活动","userId":"u1"}'
 ```
+
+`userId` 可选，带上它才会启用长期记忆。
 
 ## 目录结构
 
@@ -132,6 +134,59 @@ public class ComplaintNode extends AbstractNode {
 
 新增工具：写一个 `FlowTool` 实现类（`@Component`），注入到节点的工具列表里。如果它扩大了节点的能力范围，同步更新节点 `routeSpec()` 的描述和示例。
 
+## 记忆
+
+记忆分四层，引擎每轮开始时通过 `MemoryService.load` 一次性取出放进图状态，节点按自己的 `HistoryPolicy` 取用：
+
+| 层 | 存在哪 | 内容 | 谁写 |
+|---|---|---|---|
+| 结构化状态 | `flow_session.state` | 任务栈：进行中的任务、当前阶段、已收集的槽位、临时追问帧 | 节点（每轮同步保存） |
+| 短期记忆 | `flow_message` | 摘要之后的对话原文，每轮最多读 `load-messages` 条 | 引擎（每轮同步写） |
+| 滚动摘要 | `flow_memory_summary` | 较早对话的压缩摘要，`up_to_message_id` 之前的原文不再读取 | 后台任务 |
+| 长期记忆 | `flow_user_memory` | 按用户保存的稳定信息（常住城市、称呼……），跨会话生效 | 后台任务 |
+
+另外，历史窗口内成功的工具调用（`flow_tool_call`）也会读出来，节点打开 `includeToolResults` 时以"最近查询到的数据"放进提示词。
+
+**后台任务**：每轮成功结束、回复推给用户之后，`MemoryService.afterTurn` 在虚拟线程里执行，不占用户等待时间：
+- 滚动摘要：未摘要的消息超过 `trigger-messages` 条时，把最早的部分（只留最近 `keep-recent` 条）连同旧摘要交给记忆模型合并成新摘要。模型返回空时不推进，下一轮再试；同一会话同时只跑一个摘要任务
+- 长期记忆抽取：把本轮的用户消息和回复交给记忆模型，产出对已有记忆的增删改。请求里没有 `userId` 时不执行
+- 两个任务的模型调用都落 `flow_llm_call`（`node_id = memory`），测试页轮次详情的"后台记忆任务"里能看到；失败只记日志，不影响对话
+
+摘要放在单独的表里，而不是会话状态里，因为后台任务和下一轮对话可能同时写，分开存不会互相覆盖。
+
+**节点怎么用**（`AbstractNode`）：
+
+```java
+// 按策略取历史（条数 + token 双重限制，从最新往前保留）
+messages.addAll(historyMessages(state));
+// 记忆块：长期记忆 / 早期对话摘要 / 最近查询到的数据，按策略拼好，追加到系统提示词后面
+messages.add(system(SYSTEM_PROMPT + memoryBlock(state)));
+
+// 覆盖默认策略
+@Override
+public HistoryPolicy historyPolicy() {
+    return super.historyPolicy().withMaxMessages(6).withToolResults(true);
+}
+```
+
+现有节点的策略：
+
+| 节点 | 历史条数 | 摘要 | 长期记忆 | 工具结果 |
+|---|---|---|---|---|
+| 路由 | 6 | ✓ | | |
+| 闲聊 | 默认（12） | ✓ | ✓ | |
+| 业务查询 | 默认（12） | ✓ | ✓ | ✓ |
+| C1 收集目标人群 | 6 | ✓ | ✓ | |
+
+**配置**（`flow.memory`，各工作流在自己的 application.yml 里调整）：`recent-messages`、`max-history-tokens`、`load-messages`、`summary.*`、`long-term.*`，记忆任务用的模型是 `flow.model.memory-model`（不配置时用 `router-model`）。
+
+**二次开发时的扩展点**：
+- 摘要 / 长期记忆要记的东西不一样（例如医疗场景要记过敏史）：继承 `ConversationSummarizer` / `LongTermMemoryExtractor` 覆盖 `systemPrompt()`，标上 `@Primary`
+- token 估算要更准：实现 `TokenEstimator`，标上 `@Primary`
+- 长期记忆需要和业务系统的用户档案打通：调用方传入业务系统的用户 ID 作为 `userId`
+
+**测试页**：顶部填"用户 ID"后发消息即启用长期记忆；"会话状态"页签里能看到摘要和长期记忆，长期记忆可以手动删除。接口：`GET /api/sessions/{id}/memory`、`GET /api/users/{userId}/memories`、`DELETE /api/users/{userId}/memories/{id}`。
+
 ## 记录了什么
 
 | 表 | 内容 |
@@ -141,6 +196,7 @@ public class ComplaintNode extends AbstractNode {
 | `flow_llm_call` | 每次模型调用：合并默认参数后的完整请求、完整响应、token、耗时；通过 `exec_id` 关联到节点 |
 | `flow_tool_call` | 每次工具调用：参数、结果、耗时、状态；通过 `llm_call_id` 关联到发起它的模型调用 |
 | `flow_message` / `flow_session` | 对话消息、会话状态 |
+| `flow_memory_summary` / `flow_user_memory` | 滚动摘要、用户长期记忆（见"记忆"一节） |
 
 模型调用是通过 LangChain4j 的 `ChatModelListener` + `ChatRequestOptions.listenerAttributes` 记录的，流式回调在别的线程也能关联到正确的节点。需要看原始 HTTP 报文时打开 `flow.model.log-http`。
 
@@ -160,4 +216,4 @@ mvn test
 - C2：换成 TOOL_AGENT 节点，挂"查询可用模版"工具，手写 tool loop 并落 `flow_tool_call`
 - C3：二次确认节点，确认后由代码调用创建接口，带幂等键
 - 会话锁换 Redis；trace 改为异步批量写
-- 早期对话摘要（`summary` 字段已预留）
+- 长期记忆的过期策略（例如超过一定时间没被用到的记忆降权或删除）

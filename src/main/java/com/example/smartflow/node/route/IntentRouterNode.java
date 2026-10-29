@@ -7,6 +7,7 @@ import com.example.smartflow.flow.RouteDecision;
 import com.example.smartflow.flow.RouteDecision.Action;
 import com.example.smartflow.flow.TaskFrame;
 import com.example.smartflow.node.AbstractNode;
+import com.example.smartflow.node.HistoryPolicy;
 import com.example.smartflow.node.NodeScope;
 import com.example.smartflow.node.NodeSupport;
 import com.example.smartflow.node.NodeType;
@@ -62,6 +63,7 @@ public abstract class IntentRouterNode extends AbstractNode {
             待回答的问题：%s
 
             进行中的任务：%s
+            %s
 
             最近对话：
             %s
@@ -87,6 +89,12 @@ public abstract class IntentRouterNode extends AbstractNode {
         return NodeType.ROUTER;
     }
 
+    /** 路由每轮都要调用，只带最近 6 条和早期摘要，不带长期记忆和工具结果，保持轻量 */
+    @Override
+    public HistoryPolicy historyPolicy() {
+        return super.historyPolicy().withMaxMessages(6).withUserMemory(false).withToolResults(false);
+    }
+
     /** 当前实际生效的路由提示词，方便调试和写测试 */
     public String systemPrompt() {
         List<RouteOption> options = catalog.options(id());
@@ -101,6 +109,7 @@ public abstract class IntentRouterNode extends AbstractNode {
         prompts.put("route · user", USER_TEMPLATE.formatted(
                 "来自\"{模块名}\"（{意图编码}）：{追问原话}　　← 上一轮没有节点追问时是：（无）",
                 "{任务名（任务类型）}\n当前阶段：{阶段说明}\n已收集信息：{槽位}　　← 没有进行中的任务时这三行是：（无）",
+                "\n{早期对话摘要，没有则不出现}\n",
                 "{最近 6 条对话}", "{用户本轮消息}"));
         return prompts;
     }
@@ -171,7 +180,8 @@ public abstract class IntentRouterNode extends AbstractNode {
                     stage.isBlank() ? t.getCurrentNode() : stage, t.getSlots());
         }).orElse("（无）");
 
-        String userContent = USER_TEMPLATE.formatted(pendingDesc, taskDesc, historyAsText(state, 6), state.userInput());
+        String userContent = USER_TEMPLATE.formatted(pendingDesc, taskDesc, memoryBlock(state),
+                historyAsText(state, historyPolicy().maxMessages()), state.userInput());
 
         List<ChatMessage> messages = List.of(system(systemPrompt()), UserMessage.from(userContent));
         try {

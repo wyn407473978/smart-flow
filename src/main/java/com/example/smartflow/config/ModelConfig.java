@@ -58,6 +58,17 @@ public class ModelConfig {
                 .listeners(List.of(traceListener))
                 .build();
 
-        return new ModelRegistry(chat, router, streaming);
+        ChatModel memory = m.memoryModel().equals(m.routerModel()) ? router : OpenAiChatModel.builder()
+                .baseUrl(m.baseUrl())
+                .apiKey(m.apiKey())
+                .modelName(m.memoryModel())
+                .temperature(0.0)
+                .timeout(timeout)
+                .logRequests(logHttp)
+                .logResponses(logHttp)
+                .listeners(List.of(traceListener))
+                .build();
+
+        return new ModelRegistry(chat, router, streaming, memory);
     }
 }
