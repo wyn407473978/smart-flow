@@ -27,6 +27,10 @@ mybatis:
     default-statement-timeout: 30
 
 flow:
+  # 助手人设：各节点提示词里的名字和说话风格都从这里取，换业务只改这里
+  assistant:
+    name: 智慧民生助手
+    persona: 语气亲切、简洁、专业，用中文回答
   model:
     # 任意 OpenAI 协议兼容端点。默认是阿里云百炼的兼容模式
     base-url: https://api.deepseek.com

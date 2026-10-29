@@ -4,7 +4,37 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.boot.context.properties.bind.ConstructorBinding;
 
 @ConfigurationProperties(prefix = "flow")
-public record FlowProperties(Model model, Memory memory, Sse sse) {
+public record FlowProperties(Model model, Memory memory, Sse sse, Assistant assistant) {
+
+    @ConstructorBinding
+    public FlowProperties {
+        if (assistant == null) {
+            assistant = new Assistant(null, null);
+        }
+    }
+
+    /** 不配置助手人设时用默认值（测试里常用） */
+    public FlowProperties(Model model, Memory memory, Sse sse) {
+        this(model, memory, sse, null);
+    }
+
+    /**
+     * 助手人设。各节点的提示词都从这里取名字和说话风格，换一个业务只改配置，不用改节点代码。
+     *
+     * @param name    助手名字，出现在各节点提示词的第一句，例如"智慧民生助手"
+     * @param persona 身份和语气的补充说明，例如"语气亲切、简洁、专业，用中文回答"
+     */
+    public record Assistant(String name, String persona) {
+        public Assistant {
+            if (name == null || name.isBlank()) {
+                name = "智能助手";
+            }
+            if (persona == null || persona.isBlank()) {
+                persona = "语气亲切、简洁、专业，用中文回答";
+            }
+        }
+    }
+
 
     /**
      * @param memoryModel 后台记忆任务（滚动摘要、长期记忆抽取）用的模型，不配置时用 routerModel

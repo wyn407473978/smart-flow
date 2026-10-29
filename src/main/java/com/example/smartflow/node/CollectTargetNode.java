@@ -52,7 +52,7 @@ public class CollectTargetNode extends AbstractNode {
             """;
 
     private static final String ASK_PROMPT = """
-            你是"智慧民生"助手，正在帮用户创建活动，当前阶段是收集活动的目标人群信息。
+            你是"%s"，正在帮用户创建活动，当前阶段是收集活动的目标人群信息。%s。
 
             已收集：%s
             还缺少：%s
@@ -104,7 +104,7 @@ public class CollectTargetNode extends AbstractNode {
         Map<String, String> prompts = new LinkedHashMap<>();
         prompts.put("extract_slots · system", EXTRACT_PROMPT);
         prompts.put("ask_missing · system", ASK_PROMPT.formatted(
-                "{已收集信息}（本轮有/没有新收集到的信息）", "{还缺少的信息}", "{校验错误，没有则为空}\n"));
+                support.assistant().name(), support.assistant().persona(), "{已收集信息}（本轮有/没有新收集到的信息）", "{还缺少的信息}", "{校验错误，没有则为空}\n"));
         return prompts;
     }
 
@@ -262,6 +262,7 @@ public class CollectTargetNode extends AbstractNode {
                 : "用户本轮提供的信息有问题，需要请用户重新确认：" + String.join("；", errors) + "\n";
         String newInfoLine = changed ? "（本轮有新收集到的信息）" : "（本轮没有收集到新信息）";
         String sys = ASK_PROMPT.formatted(
+                support.assistant().name(), support.assistant().persona(),
                 describe(slots) + " " + newInfoLine,
                 missing.isEmpty() ? "（无）" : String.join("、", missing),
                 errorLine);

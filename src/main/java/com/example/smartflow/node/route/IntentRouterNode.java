@@ -81,8 +81,10 @@ public abstract class IntentRouterNode extends AbstractNode {
         this.catalog = catalog;
     }
 
-    /** 助手的名字，出现在提示词第一句 */
-    protected abstract String assistantName();
+    /** 助手的名字，出现在提示词第一句。默认取 flow.assistant.name，二级路由可以覆盖成更具体的名字 */
+    protected String assistantName() {
+        return support.assistant().name();
+    }
 
     @Override
     public NodeType type() {

@@ -49,5 +49,8 @@ public class NodeSupport {
     /** 专门解析模型输出的 JSON：枚举大小写不敏感、多余字段忽略、未知枚举值当 null */
     public ObjectMapper llmJsonMapper() { return LlmJson.MAPPER; }
     public FlowProperties props() { return props; }
+
+    /** 助手人设（名字、语气），各节点拼提示词时使用 */
+    public FlowProperties.Assistant assistant() { return props.assistant(); }
     public TokenEstimator tokenEstimator() { return tokenEstimator; }
 }

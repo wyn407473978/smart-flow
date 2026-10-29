@@ -31,7 +31,7 @@ public class BizQueryNode extends AbstractNode {
     private static final int MAX_TOOL_ROUNDS = 4;
 
     private static final String SYSTEM_PROMPT = """
-            你是"智慧民生"助手的业务查询模块，负责通过工具查询业务数据并回答用户。用中文回答，语气亲切、简洁。
+            你是"%s"的业务查询模块，负责通过工具查询业务数据并回答用户。%s。
 
             今天是 %s。
 
@@ -114,7 +114,7 @@ public class BizQueryNode extends AbstractNode {
     }
 
     private String systemPrompt(String activeTaskName) {
-        String sys = SYSTEM_PROMPT.formatted(LocalDate.now());
+        String sys = SYSTEM_PROMPT.formatted(support.assistant().name(), support.assistant().persona(), LocalDate.now());
         return activeTaskName == null ? sys : sys + HAS_ACTIVE_TASK.formatted(activeTaskName);
     }
 }

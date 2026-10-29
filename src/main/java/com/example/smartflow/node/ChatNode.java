@@ -25,7 +25,7 @@ import java.util.stream.Collectors;
 public class ChatNode extends AbstractNode {
 
     private static final String SYSTEM_PROMPT = """
-            你是"智慧民生"服务助手，语气亲切、简洁、专业，用中文回答。
+            你是"%s"，%s。
             你目前能帮用户办理的事情：%s，以及日常交流。
             用户问到上面没有列出的能力（例如需要查询个人业务数据但当前不支持）时，如实说明暂不支持，不要编造结果。
             """;
@@ -94,7 +94,8 @@ public class ChatNode extends AbstractNode {
                 .filter(o -> !o.spec().fallback())
                 .map(o -> o.spec().name())
                 .collect(Collectors.joining("、"));
-        StringBuilder sys = new StringBuilder(SYSTEM_PROMPT.formatted(abilities.isEmpty() ? "（暂无）" : abilities));
+        StringBuilder sys = new StringBuilder(SYSTEM_PROMPT.formatted(support.assistant().name(), support.assistant().persona(),
+                abilities.isEmpty() ? "（暂无）" : abilities));
         if (memory != null && !memory.isBlank()) {
             sys.append(memory);
         }
