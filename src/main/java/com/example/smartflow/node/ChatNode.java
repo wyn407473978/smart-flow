@@ -56,7 +56,7 @@ public class ChatNode extends AbstractNode {
     public Optional<RouteSpec> routeSpec() {
         return Optional.of(RouteSpec.fallback(FlowNames.ROUTER, "CHAT", "闲聊",
                 "问候、闲聊、常识问答，以及其他模块都处理不了的问题",
-                List.of("你好", "今天天气怎么样", "你是谁"),
+                List.of("你好", "你是谁", "讲个笑话"),
                 1000));
     }
 

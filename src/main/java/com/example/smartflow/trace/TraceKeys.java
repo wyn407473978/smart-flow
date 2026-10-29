@@ -16,7 +16,9 @@ public final class TraceKeys {
     public static final String PURPOSE = "flow.purpose";
     public static final String STREAMING = "flow.streaming";
 
+    /** 本次模型调用的 ID。节点可以预先指定（工具调用需要关联到发起它的模型调用），不指定则由 listener 生成 */
+    public static final String CALL_ID = "flow.callId";
+
     // listener 内部使用
-    static final String CALL_ID = "flow.callId";
     static final String START_NANOS = "flow.startNanos";
 }

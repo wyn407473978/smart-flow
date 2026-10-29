@@ -45,7 +45,8 @@ public class TraceChatModelListener implements ChatModelListener {
     @Override
     public void onRequest(ChatModelRequestContext ctx) {
         Map<Object, Object> attrs = ctx.attributes();
-        String callId = UUID.randomUUID().toString();
+        Object preset = attrs.get(TraceKeys.CALL_ID);
+        String callId = preset != null ? preset.toString() : UUID.randomUUID().toString();
         attrs.put(TraceKeys.CALL_ID, callId);
         attrs.put(TraceKeys.START_NANOS, System.nanoTime());
         try {

@@ -7,7 +7,8 @@ Spring Boot 3.5 + LangChain4j 1.19 + LangGraph4j 1.8（LTS）+ PostgreSQL。
 | 节点 | ID | 类型 | 说明 |
 |---|---|---|---|
 | A 路由 | `router` | ROUTER | 每轮必经。提示词由子节点的路由声明自动拼成；模型判断 action + intent，去向和任务栈变化由代码决定 |
-| B3 闲聊 | `chat` | CHAT | 流式回复；业务查询（B2）未接入前也落到这里 |
+| B2 业务查询 | `biz_query` | TOOL_AGENT | 挂载 `get_weather`（查天气，演示数据）、`get_user_info`（查本人信息：rise / 27 岁）；手写 tool loop，流式输出 |
+| B3 闲聊 | `chat` | CHAT | 流式回复；根路由的兜底节点 |
 | C1 目标人群 | `collect_target` | SLOT_FILLING | 抽取年龄 / 性别 / 区域 → 代码校验合并 → 收齐则同一轮进入 C2，否则流式追问 |
 | C2 模版确认 | `choose_template` | PLACEHOLDER | 占位节点，用来验证 C1→C2 同轮流转 |
 
@@ -112,6 +113,18 @@ public class ComplaintNode extends AbstractNode {
 
 以后某个分支下子节点多了需要二级路由（例如 B1 下有多种任务），继承 `IntentRouterNode` 换个 id，子节点把 `parent` 指向它即可，同样不用改提示词。
 
+## 工具节点
+
+`BizQueryNode` 是带工具节点的样板，没有用 `@Tool` + AiServices，而是：
+
+1. 每个工具实现 `FlowTool`：显式给出 `ToolSpecification`（名字、描述、参数 schema）和 `execute(args, context)`
+2. 节点调用基类的 `streamWithTools(scope, purpose, messages, tools, maxRounds)`：
+   把工具定义发给模型 → 模型要调工具就逐个执行、结果追加进对话 → 直到模型给出最终回答（最多 `maxRounds` 轮，防死循环）
+3. 每次工具调用落 `flow_tool_call`（参数、结果、耗时、状态，并通过 `llm_call_id` 关联到发起它的那次模型调用），同时推送 `tool` 事件，测试页实时事件和轮次详情里都能看到
+4. 工具不存在或抛异常时，把错误信息作为工具结果返回给模型，由模型如实告诉用户，不会中断整轮对话
+
+新增工具：写一个 `FlowTool` 实现类（`@Component`），注入到节点的工具列表里。如果它扩大了节点的能力范围，同步更新节点 `routeSpec()` 的描述和示例。
+
 ## 记录了什么
 
 | 表 | 内容 |
@@ -119,7 +132,7 @@ public class ComplaintNode extends AbstractNode {
 | `flow_turn` | 每轮的输入、最终回复、路由结果、节点路径、执行前后状态、耗时、异常 |
 | `flow_node_exec` | 每个节点的输入状态、输出更新、耗时、异常 |
 | `flow_llm_call` | 每次模型调用：合并默认参数后的完整请求、完整响应、token、耗时；通过 `exec_id` 关联到节点 |
-| `flow_tool_call` | 已建表，B2 / C2 接入工具时使用 |
+| `flow_tool_call` | 每次工具调用：参数、结果、耗时、状态；通过 `llm_call_id` 关联到发起它的模型调用 |
 | `flow_message` / `flow_session` | 对话消息、会话状态 |
 
 模型调用是通过 LangChain4j 的 `ChatModelListener` + `ChatRequestOptions.listenerAttributes` 记录的，流式回调在别的线程也能关联到正确的节点。需要看原始 HTTP 报文时打开 `flow.model.log-http`。
@@ -139,6 +152,5 @@ mvn test
 
 - C2：换成 TOOL_AGENT 节点，挂"查询可用模版"工具，手写 tool loop 并落 `flow_tool_call`
 - C3：二次确认节点，确认后由代码调用创建接口，带幂等键
-- B2：业务查询节点，`RouterNode.targetFor` 里把 BIZ_QUERY 指过去
 - 会话锁换 Redis；trace 改为异步批量写
 - 早期对话摘要（`summary` 字段已预留）

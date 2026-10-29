@@ -11,6 +11,8 @@ public final class FlowNames {
     // ---- 节点 ----
     /** A：全局路由，每轮必经 */
     public static final String ROUTER = "router";
+    /** B2：业务查询（挂载工具） */
+    public static final String BIZ_QUERY = "biz_query";
     /** B3：自由对话 */
     public static final String CHAT = "chat";
     /** C1：活动创建 - 收集目标人群 */

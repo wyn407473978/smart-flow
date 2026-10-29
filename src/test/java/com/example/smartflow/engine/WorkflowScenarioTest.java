@@ -7,6 +7,7 @@ import com.example.smartflow.flow.FlowState;
 import com.example.smartflow.flow.HistoryMessage;
 import com.example.smartflow.llm.ModelRegistry;
 import com.example.smartflow.node.AbstractNode;
+import com.example.smartflow.node.BizQueryNode;
 import com.example.smartflow.node.ChatNode;
 import com.example.smartflow.node.ChooseTemplatePlaceholderNode;
 import com.example.smartflow.node.CollectTargetNode;
@@ -18,13 +19,17 @@ import com.example.smartflow.node.route.RouteCatalog;
 import com.example.smartflow.node.route.RouteSpec;
 import com.example.smartflow.session.SessionRepository;
 import com.example.smartflow.session.SessionState;
+import com.example.smartflow.tool.UserInfoTool;
+import com.example.smartflow.tool.WeatherTool;
 import com.example.smartflow.trace.TraceChatModelListener;
 import com.example.smartflow.trace.TraceRepository;
 import com.example.smartflow.web.NodeController;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import dev.langchain4j.agent.tool.ToolExecutionRequest;
 import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.data.message.ChatMessage;
 import dev.langchain4j.data.message.SystemMessage;
+import dev.langchain4j.data.message.ToolExecutionResultMessage;
 import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.chat.StreamingChatModel;
 import dev.langchain4j.model.chat.listener.ChatModelListener;
@@ -63,6 +68,10 @@ class WorkflowScenarioTest {
     private final List<String> llmCalls = new ArrayList<>();
     private final FakeSessions sessions = new FakeSessions();
     private final List<String> routerPrompts = new ArrayList<>();
+    private final Deque<String> toolScript = new ArrayDeque<>();
+    private final Map<String, String> llmCallIds = new java.util.concurrent.ConcurrentHashMap<>();
+    /** toolCallId → [工具名, 参数, 发起它的模型调用(节点/用途), 状态, 结果] */
+    private final Map<String, List<String>> toolCalls = new java.util.LinkedHashMap<>();
 
     private final FlowProperties props = new FlowProperties(
             new FlowProperties.Model("http://stub", "stub", "chat", "router", 0.3, 5, false),
@@ -83,7 +92,8 @@ class WorkflowScenarioTest {
                 new StubStreamingModel(List.of(listener)));
         support = new NodeSupport(models, trace, turns, MAPPER, props);
         nodes.addAll(List.of(new RouterNode(support, catalog), new ChatNode(support, catalog),
-                new CollectTargetNode(support), new ChooseTemplatePlaceholderNode(support)));
+                new CollectTargetNode(support), new ChooseTemplatePlaceholderNode(support),
+                new BizQueryNode(support, catalog, new WeatherTool(MAPPER), new UserInfoTool(MAPPER))));
         rebuild();
     }
 
@@ -141,6 +151,63 @@ class WorkflowScenarioTest {
         var r = turn("s4", "对了楼道灯坏了", List.of("router", "complaint"), "collect_target");
         assertEquals("已记录你的反馈。\n\n对了，刚才的活动创建还没完成，要继续吗？", r.reply());
         assertTrue(routerPrompts.get(routerPrompts.size() - 1).contains("COMPLAINT"), "真正发给模型的提示词里有新节点");
+    }
+
+    // =====================================================================
+    // B2 业务查询：工具调用
+    // =====================================================================
+
+    @Test
+    void bizQueryCallsTools() {
+        routerScript.add("{\"action\":\"START\",\"intent\":\"BIZ_QUERY\",\"reason\":\"查天气和个人信息\"}");
+        toolScript.add("get_weather:{\"city\":\"杭州\"}|get_user_info:");
+        var r = turn("b1", "杭州天气怎么样，顺便看看我叫什么", List.of("router", "biz_query"), null);
+
+        // 两个工具都被调用、都成功，并且都关联到发起它们的那次模型调用
+        assertEquals(2, toolCalls.size());
+        var calls = new ArrayList<>(toolCalls.values());
+        assertEquals(List.of("get_weather", "{\"city\":\"杭州\"}", "biz_query/answer", "SUCCESS"), calls.get(0).subList(0, 4));
+        assertEquals(List.of("get_user_info", "{}", "biz_query/answer", "SUCCESS"), calls.get(1).subList(0, 4));
+        assertTrue(calls.get(0).get(4).contains("\"city\":\"杭州\""), calls.get(0).get(4));
+        assertTrue(calls.get(1).get(4).contains("\"name\":\"rise\"") && calls.get(1).get(4).contains("\"age\":27"));
+
+        // 工具结果传回了模型，第二轮的回答里能看到；两轮文字之间换行
+        assertTrue(r.reply().startsWith("我查一下。\n查询结果："), r.reply());
+        assertTrue(r.reply().contains("rise") && r.reply().contains("杭州"), r.reply());
+        assertTrue(llmCalls.contains("biz_query/answer#2"), "第二轮模型调用应被记录");
+    }
+
+    @Test
+    void bizQueryDuringTaskIsDigression() {
+        routerScript.add("{\"action\":\"START\",\"intent\":\"ACTIVITY_CREATE\",\"reason\":\"\"}");
+        extractScript.add("{}");
+        turn("b2", "我想办一个活动", List.of("router", "collect_target"), "collect_target");
+
+        // 模型说 START 也没关系：有任务时去一次性节点，代码会按插话处理，任务保留
+        routerScript.add("{\"action\":\"START\",\"intent\":\"BIZ_QUERY\",\"reason\":\"问个人信息\"}");
+        toolScript.add("get_user_info:{}");
+        var r = turn("b2", "我叫什么名字", List.of("router", "biz_query"), "collect_target");
+        assertTrue(r.reply().contains("rise"), r.reply());
+        assertTrue(r.reply().endsWith("对了，刚才的活动创建还没完成，要继续吗？"), r.reply());
+    }
+
+    @Test
+    void unknownToolReturnsErrorToModel() {
+        routerScript.add("{\"action\":\"START\",\"intent\":\"BIZ_QUERY\",\"reason\":\"\"}");
+        toolScript.add("drop_database:{}");
+        var r = turn("b3", "帮我删库", List.of("router", "biz_query"), null);
+        var call = toolCalls.values().iterator().next();
+        assertEquals("ERROR", call.get(3));
+        assertTrue(r.reply().contains("工具执行失败"), "错误信息应传回模型: " + r.reply());
+    }
+
+    @Test
+    void bizQueryIsRegisteredInRouterPrompt() {
+        String prompt = ((RouterNode) nodes.get(0)).systemPrompt();
+        assertTrue(prompt.contains("- BIZ_QUERY（业务查询）："), prompt);
+        String tools = new BizQueryNode(support, catalog, new WeatherTool(MAPPER), new UserInfoTool(MAPPER))
+                .promptPreview().get("answer · tools");
+        assertTrue(tools.contains("get_weather") && tools.contains("city（必填）") && tools.contains("get_user_info"), tools);
     }
 
     @Test
@@ -257,7 +324,13 @@ class WorkflowScenarioTest {
         }
     }
 
-    private static class StubStreamingModel implements StreamingChatModel {
+    /**
+     * 流式模型桩：
+     * - 业务查询节点：本轮还没有工具结果时，按 toolScript 返回工具调用（"名字:参数JSON"，多个用 | 分隔）；
+     *   有了工具结果后，返回把工具结果原样拼进去的文字，用来验证结果确实传回了模型
+     * - 其他节点：固定返回【流式回复】
+     */
+    private class StubStreamingModel implements StreamingChatModel {
         private final List<ChatModelListener> listeners;
 
         StubStreamingModel(List<ChatModelListener> listeners) { this.listeners = listeners; }
@@ -268,6 +341,28 @@ class WorkflowScenarioTest {
         @Override
         public void doChat(ChatRequest request, StreamingChatResponseHandler handler) {
             new Thread(() -> {
+                if (systemText(request).contains("业务查询模块")) {
+                    List<String> results = request.messages().stream()
+                            .filter(m -> m instanceof ToolExecutionResultMessage)
+                            .map(m -> ((ToolExecutionResultMessage) m).text()).toList();
+                    if (results.isEmpty()) {
+                        assertTrue(!request.toolSpecifications().isEmpty(), "业务查询节点应把工具定义发给模型");
+                        List<ToolExecutionRequest> calls = new ArrayList<>();
+                        for (String c : toolScript.pop().split("\\|")) {
+                            int i = c.indexOf(':');
+                            calls.add(ToolExecutionRequest.builder().id("call_" + calls.size())
+                                    .name(c.substring(0, i)).arguments(c.substring(i + 1)).build());
+                        }
+                        handler.onPartialResponse("我查一下。");
+                        handler.onCompleteResponse(ChatResponse.builder()
+                                .aiMessage(AiMessage.from("我查一下。", calls)).build());
+                        return;
+                    }
+                    String text = "查询结果：" + String.join("；", results);
+                    handler.onPartialResponse(text);
+                    handler.onCompleteResponse(ChatResponse.builder().aiMessage(AiMessage.from(text)).build());
+                    return;
+                }
                 handler.onPartialResponse("【流式");
                 handler.onPartialResponse("回复】");
                 handler.onCompleteResponse(ChatResponse.builder().aiMessage(AiMessage.from("【流式回复】")).build());
@@ -290,6 +385,7 @@ class WorkflowScenarioTest {
         public void insertLlmCall(String callId, String turnId, String sessionId, String execId, String nodeId, String purpose,
                                   String provider, String modelName, boolean streaming, String requestBodyJson) {
             llmCalls.add(nodeId + "/" + purpose);
+            llmCallIds.put(callId, nodeId + "/" + purpose);
             assertTrue(execId != null, "模型调用应关联到节点执行");
             readTree(requestBodyJson);
         }
@@ -299,6 +395,18 @@ class WorkflowScenarioTest {
                                   Integer total, String finishReason, String status, String err, long ms) {
             assertEquals("SUCCESS", status);
             readTree(responseBodyJson);
+        }
+
+        @Override
+        public void insertToolCall(String toolCallId, String turnId, String sessionId, String execId, String llmCallId,
+                                   String nodeId, String toolName, String argumentsJson) {
+            readTree(argumentsJson);
+            toolCalls.put(toolCallId, new ArrayList<>(List.of(toolName, argumentsJson, String.valueOf(llmCallIds.get(llmCallId)))));
+        }
+
+        @Override
+        public void finishToolCall(String toolCallId, String result, String status, String errorMsg, long latencyMs) {
+            toolCalls.get(toolCallId).addAll(List.of(status, result));
         }
 
         private void readTree(String json) {

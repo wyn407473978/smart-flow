@@ -131,6 +131,8 @@
   .chatmsg.SYSTEM { border-left-color: var(--warn); }
   .chatmsg.USER { border-left-color: var(--user); }
   .chatmsg.AI { border-left-color: var(--accent); }
+  .chatmsg.TOOL_EXECUTION_RESULT { border-left-color: var(--muted); }
+  .chatmsg .call { font: 12px var(--mono); color: var(--accent); }
   .stats { display: flex; flex-wrap: wrap; gap: 12px; font: 12px var(--mono); color: var(--muted); }
   details > summary { cursor: pointer; color: var(--muted); font-size: 12px; margin-top: 8px; }
 
@@ -196,7 +198,7 @@
 
 <script>
 (() => {
-  const PRESETS = ['我想办一个活动', '60岁以上的女性', '今天天气怎么样', '阳光社区', '社保怎么查', '算了不办了'];
+  const PRESETS = ['我想办一个活动', '60岁以上的女性', '杭州今天天气怎么样', '我叫什么名字', '阳光社区', '今天天气怎么样', '社保怎么查', '算了不办了'];
   const $ = id => document.getElementById(id);
   const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const pretty = v => {
@@ -329,6 +331,9 @@
           flushTokens(); log('node ▶', `${d.node}  (${d.type})`); break;
         case 'node_end':
           flushTokens(); log('node ■', `${d.node}  ${d.status}  ${d.latencyMs}ms`, d.status === 'ERROR' ? 'error' : ''); break;
+        case 'tool':
+          flushTokens();
+          log('tool', `${d.name}(${d.arguments || ''}) → ${d.result}  ${d.status} ${d.latencyMs}ms`, d.status === 'ERROR' ? 'error' : ''); break;
         case 'route':
           log('route', `${d.action} / ${d.intent} → ${d.target}${d.fallback ? '  [兜底]' : ''}  ${d.reason || ''}`); break;
         case 'token':
@@ -433,6 +438,8 @@
     const path = parse(turn.node_path) || [];
     const callsByExec = {};
     llmCalls.forEach(c => (callsByExec[c.exec_id] = callsByExec[c.exec_id] || []).push(c));
+    const toolsByExec = {};
+    toolCalls.forEach(t => (toolsByExec[t.exec_id] = toolsByExec[t.exec_id] || []).push(t));
     const tokens = llmCalls.reduce((a, c) => a + (c.total_tokens || 0), 0);
 
     pane.innerHTML = `
@@ -451,13 +458,12 @@
         <details><summary>执行后状态</summary><pre class="json">${esc(pretty(turn.state_after))}</pre></details>
       </div></div>
       <div class="label">节点执行（${nodes.length}）</div>
-      ${nodes.map(n => nodeCard(n, callsByExec[n.exec_id] || [])).join('')}
-      ${toolCalls.length ? `<div class="label">工具调用（${toolCalls.length}）</div>` + toolCalls.map(toolCard).join('') : ''}`;
+      ${nodes.map(n => nodeCard(n, callsByExec[n.exec_id] || [], toolsByExec[n.exec_id] || [])).join('')}`;
 
     pane.querySelectorAll('.hd.click').forEach(h => h.onclick = () => h.parentElement.classList.toggle('collapsed'));
   }
 
-  function nodeCard(n, calls) {
+  function nodeCard(n, calls, tools) {
     return `<div class="card"><div class="hd click">
         <span class="mono muted">${n.seq}</span><b>${esc(n.node_id)}</b><span class="tag">${esc(n.node_type)}</span>
         <span class="grow"></span><span class="mono muted">${n.latency_ms ?? '-'}ms</span>
@@ -467,13 +473,21 @@
         <details><summary>节点输入状态</summary><pre class="json">${esc(pretty(n.input_state))}</pre></details>
         <details open><summary>节点输出（状态更新）</summary><pre class="json">${esc(pretty(n.output_update))}</pre></details>
         ${calls.length ? `<div class="label">模型调用（${calls.length}）</div>` + calls.map(llmCard).join('') : ''}
+        ${tools.length ? `<div class="label">工具调用（${tools.length}）</div>` + tools.map(toolCard).join('') : ''}
       </div></div>`;
   }
 
   function llmCard(c) {
     const req = parse(c.request_body) || {};
     const msgs = Array.isArray(req.messages) ? req.messages : [];
-    const text = m => m.text ?? (m.contents || []).map(x => x.text ?? `[${x.type}]`).join('\n');
+    const body = m => m.text ?? (m.contents || []).map(x => x.text ?? `[${x.type}]`).join('\n');
+    const calls = list => (list || []).map(r => `<div class="call">→ 调用工具 ${esc(r.name)}(${esc(r.arguments || '')})</div>`).join('');
+    const msgHtml = m => {
+      if (m.type === 'TOOL_EXECUTION_RESULT') return `<div class="call">← ${esc(m.toolName)} 返回</div>${esc(body(m))}`;
+      return esc(m.text ?? (m.toolExecutionRequests ? '' : body(m))) + calls(m.toolExecutionRequests);
+    };
+    const resp = parse(c.response_body) || {};
+    const respCalls = resp.aiMessage?.toolExecutionRequests;
     return `<div class="card collapsed" style="margin-top:8px"><div class="hd click">
         <b class="mono">${esc(c.purpose || '-')}</b><span class="tag">${esc(c.model_name || '-')}</span>
         ${c.streaming ? '<span class="tag">stream</span>' : ''}
@@ -483,15 +497,17 @@
       </div><div class="bd">
         <div class="label">请求参数</div><pre class="json">${esc(pretty(req.parameters))}</pre>
         <div class="label">请求消息（${msgs.length}）</div>
-        ${msgs.map(m => `<div class="chatmsg ${esc(m.type)}"><div class="role">${esc(m.type)}</div>${esc(text(m))}</div>`).join('')}
-        <div class="label">响应文本</div><pre class="json">${esc(c.response_text ?? c.error_msg ?? '')}</pre>
+        ${msgs.map(m => `<div class="chatmsg ${esc(m.type)}"><div class="role">${esc(m.type)}</div>${msgHtml(m)}</div>`).join('')}
+        <div class="label">响应</div>
+        ${c.response_text || !respCalls ? `<pre class="json">${esc(c.response_text ?? c.error_msg ?? '')}</pre>` : ''}
+        ${respCalls ? `<div class="chatmsg AI">${calls(respCalls)}</div>` : ''}
         <details><summary>原始请求 JSON</summary><pre class="json">${esc(pretty(c.request_body))}</pre></details>
         <details><summary>原始响应 JSON</summary><pre class="json">${esc(pretty(c.response_body))}</pre></details>
       </div></div>`;
   }
 
   function toolCard(t) {
-    return `<div class="card"><div class="hd click"><b class="mono">${esc(t.tool_name)}</b><span class="grow"></span>
+    return `<div class="card" style="margin-top:8px"><div class="hd click"><b class="mono">${esc(t.tool_name)}</b><span class="grow"></span>
         <span class="mono muted">${t.latency_ms ?? '-'}ms</span><span class="tag ${t.status === 'SUCCESS' ? 'ok' : 'err'}">${esc(t.status)}</span>
       </div><div class="bd"><div class="label">参数</div><pre class="json">${esc(pretty(t.arguments))}</pre>
         <div class="label">结果</div><pre class="json">${esc(pretty(t.result ?? t.error_msg))}</pre></div></div>`;
