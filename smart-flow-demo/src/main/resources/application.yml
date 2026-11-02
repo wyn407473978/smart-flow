@@ -67,4 +67,7 @@ logging:
     # 想看 MyBatis 实际执行的 SQL 和参数时，把下面这些 Mapper 的级别改成 debug
     com.example.smartflow.session.SessionMapper: info
     com.example.smartflow.memory.MemoryMapper: info
-    com.example.smartflow.trace.TraceMapper: info
+    com.example.smartflow.trace.TurnMapper: info
+    com.example.smartflow.trace.NodeExecMapper: info
+    com.example.smartflow.trace.LlmCallMapper: info
+    com.example.smartflow.trace.ToolCallMapper: info
