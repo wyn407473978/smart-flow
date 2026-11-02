@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.example.smartflow.trace.ToolCallMapper">
+
+    <resultMap id="toolFact" type="com.example.smartflow.flow.ToolFact">
+        <constructor>
+            <arg column="turn_id" javaType="string"/>
+            <arg column="tool_name" javaType="string"/>
+            <arg column="arguments" javaType="string"/>
+            <arg column="result" javaType="string"/>
+        </constructor>
+    </resultMap>
+
+    <insert id="insertToolCall">
+        INSERT INTO flow_tool_call (tool_call_id, turn_id, session_id, exec_id, llm_call_id,
+                                    node_id, tool_name, arguments, status)
+        VALUES (#{toolCallId}, #{turnId}, #{sessionId}, #{execId}, #{llmCallId},
+                #{nodeId}, #{toolName}, CAST(#{argumentsJson} AS jsonb), 'RUNNING')
+    </insert>
+
+    <update id="finishToolCall">
+        UPDATE flow_tool_call
+        SET result      = #{result},
+            status      = #{status},
+            error_msg   = #{errorMsg},
+            latency_ms  = #{latencyMs},
+            finished_at = now()
+        WHERE tool_call_id = #{toolCallId}
+    </update>
+
+    <select id="listToolFacts" resultMap="toolFact">
+        SELECT turn_id, tool_name, arguments::text AS arguments, result
+        FROM flow_tool_call
+        WHERE session_id = #{sessionId}
+          AND status = 'SUCCESS'
+          AND tool_name &lt;&gt; 'ask_user'
+          AND turn_id IN
+          <foreach collection="turnIds" item="tid" open="(" separator="," close=")">#{tid}</foreach>
+        ORDER BY started_at
+    </select>
+
+    <select id="listToolCalls" resultType="java.util.LinkedHashMap">
+        SELECT tool_call_id, exec_id, llm_call_id, node_id, tool_name, arguments::text AS arguments,
+               result, status, error_msg, latency_ms, started_at
+        FROM flow_tool_call
+        WHERE turn_id = #{turnId}
+        ORDER BY started_at
+    </select>
+
+</mapper>

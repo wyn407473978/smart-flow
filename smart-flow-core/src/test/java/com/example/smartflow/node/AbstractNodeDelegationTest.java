@@ -119,7 +119,7 @@ class AbstractNodeDelegationTest {
             }
         };
         List<String> toolLlmIds = new ArrayList<>();
-        TraceRepository trace = new TraceRepository(null, new ObjectMapper()) {
+        TraceRepository trace = new TraceRepository(null, null, null, null, new ObjectMapper()) {
             @Override
             public void insertToolCall(String toolCallId, String turnId, String sessionId, String execId,
                                        String llmCallId, String nodeId, String toolName, String argumentsJson) {

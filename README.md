@@ -7,6 +7,8 @@ Spring Boot 3.5 + LangChain4j 1.19 + LangGraph4j 1.8（LTS）+ MyBatis 3 + Postg
 
 **从零搭一个新工作流：见 [docs/new-workflow.md](docs/new-workflow.md)**（以物业报修为例，3 个节点）。
 
+**理解架构与对话流转：见 [架构文档](docs/architecture.md)**（模块职责、状态设计、执行流程、追问与插话、完整对话示例及源码阅读顺序）。
+
 ## 模块
 
 | 模块 | 内容 | 业务工程是否依赖 |
@@ -71,7 +73,7 @@ smart-flow-core/src/main/java/com/example/smartflow/
   engine/         WorkflowEngine（每轮入口）、轮次上下文、推送事件
   memory/         NodeContextBuilder（历史窗口与记忆上下文）、滚动摘要、长期记忆（MemoryRepository → MemoryMapper）
   session/        会话状态、消息存取（SessionRepository → SessionMapper）
-  trace/          轮次 / 节点 / 模型调用 / 工具调用 记录；ChatModelListener（TraceRepository → TraceMapper）
+  trace/          执行记录与 ChatModelListener；TraceRepository → TurnMapper / NodeExecMapper / LlmCallMapper / ToolCallMapper
   tool/           FlowTool、内置 AskUserTool、ToolLoopRunner（工具循环和调用记录）、工具调试说明
 smart-flow-core/src/main/resources/
   com/example/smartflow/**/*Mapper.xml   MyBatis SQL，和 Mapper 接口同路径

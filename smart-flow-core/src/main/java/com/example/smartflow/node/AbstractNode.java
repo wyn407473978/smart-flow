@@ -93,12 +93,12 @@ public abstract class AbstractNode implements NodeAction<FlowState> {
 
     @Override
     public final Map<String, Object> apply(FlowState state) throws Exception {
-        TurnContext turn = support.turns().get(state.turnId());
+        TurnContext turn = support.turnsRepository().get(state.turnId());
         int seq = turn.nextNodeSeq(id());
         String execId = UUID.randomUUID().toString();
         long start = System.nanoTime();
 
-        support.trace().insertNodeExec(execId, turn.turnId(), turn.sessionId(), seq, id(), type().name(), inputSnapshot(state));
+        support.traceRepository().insertNodeExec(execId, turn.turnId(), turn.sessionId(), seq, id(), type().name(), inputSnapshot(state));
         turn.emit(TurnEvent.of("node_start", "node", id(), "type", type().name(), "seq", seq));
 
         try {
@@ -107,13 +107,13 @@ public abstract class AbstractNode implements NodeAction<FlowState> {
             // 没有指定下一个节点就结束本轮；必须每次都写，否则会沿用上一个节点留下的值
             updates.putIfAbsent(FlowState.NEXT_NODE, FlowNames.END_TURN);
             long ms = elapsedMs(start);
-            support.trace().finishNodeExec(execId, updates, "SUCCESS", null, ms);
+            support.traceRepository().finishNodeExec(execId, updates, "SUCCESS", null, ms);
             turn.emit(TurnEvent.of("node_end", "node", id(), "status", "SUCCESS", "latencyMs", ms));
             return updates;
         } catch (Exception e) {
             long ms = elapsedMs(start);
             log.error("节点执行失败 node={} turn={}", id(), turn.turnId(), e);
-            support.trace().finishNodeExec(execId, null, "ERROR",
+            support.traceRepository().finishNodeExec(execId, null, "ERROR",
                     e.getClass().getSimpleName() + ": " + e.getMessage(), ms);
             turn.emit(TurnEvent.of("node_end", "node", id(), "status", "ERROR", "latencyMs", ms));
             throw e;

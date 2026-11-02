@@ -814,7 +814,7 @@ class WorkflowScenarioTest {
 
     /** 不落库，只校验写入的 JSON 合法，并记录模型调用 */
     private class FakeTrace extends TraceRepository {
-        FakeTrace() { super(null, MAPPER); }
+        FakeTrace() { super(null, null, null, null, MAPPER); }
 
         @Override public void insertTurn(String turnId, String sessionId, int seq, String userInput, Object stateBefore) { json(stateBefore); }
         @Override public void finishTurn(String turnId, String reply, String a, String t, List<String> path, Object after,

@@ -22,8 +22,8 @@ import org.springframework.stereotype.Component;
 public class NodeSupport {
 
     private final ModelRegistry models;
-    private final TraceRepository trace;
-    private final TurnRegistry turns;
+    private final TraceRepository traceRepository;
+    private final TurnRegistry turnRegistry;
     private final ObjectMapper mapper;
     private final FlowProperties props;
     private final TokenEstimator tokenEstimator;
@@ -32,28 +32,28 @@ public class NodeSupport {
     private final NodeContextBuilder contextBuilder;
 
     @Autowired
-    public NodeSupport(ModelRegistry models, TraceRepository trace, TurnRegistry turns,
+    public NodeSupport(ModelRegistry models, TraceRepository traceRepository, TurnRegistry turnRegistry,
                        ObjectMapper mapper, FlowProperties props, TokenEstimator tokenEstimator) {
         this.models = models;
-        this.trace = trace;
-        this.turns = turns;
+        this.traceRepository = traceRepository;
+        this.turnRegistry = turnRegistry;
         this.mapper = mapper;
         this.props = props;
         this.tokenEstimator = tokenEstimator;
         this.modelClient = new NodeModelClient(models, props, LlmJson.MAPPER);
-        this.toolLoopRunner = new ToolLoopRunner(modelClient, trace, LlmJson.MAPPER);
+        this.toolLoopRunner = new ToolLoopRunner(modelClient, traceRepository, LlmJson.MAPPER);
         this.contextBuilder = new NodeContextBuilder(props, tokenEstimator);
     }
 
     /** 测试或非 Spring 环境：使用默认的 token 估算 */
-    public NodeSupport(ModelRegistry models, TraceRepository trace, TurnRegistry turns,
+    public NodeSupport(ModelRegistry models, TraceRepository traceRepository, TurnRegistry turnRegistry,
                        ObjectMapper mapper, FlowProperties props) {
-        this(models, trace, turns, mapper, props, new SimpleTokenEstimator());
+        this(models, traceRepository, turnRegistry, mapper, props, new SimpleTokenEstimator());
     }
 
     public ModelRegistry models() { return models; }
-    public TraceRepository trace() { return trace; }
-    public TurnRegistry turns() { return turns; }
+    public TraceRepository traceRepository() { return traceRepository; }
+    public TurnRegistry turnsRepository() { return turnRegistry; }
     public ObjectMapper mapper() { return mapper; }
     /** 专门解析模型输出的 JSON：枚举大小写不敏感、多余字段忽略、未知枚举值当 null */
     public ObjectMapper llmJsonMapper() { return LlmJson.MAPPER; }

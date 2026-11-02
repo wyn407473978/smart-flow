@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.example.smartflow.trace.NodeExecMapper">
+
+    <insert id="insertNodeExec">
+        INSERT INTO flow_node_exec (exec_id, turn_id, session_id, seq, node_id, node_type, input_state, status)
+        VALUES (#{execId}, #{turnId}, #{sessionId}, #{seq}, #{nodeId}, #{nodeType},
+                CAST(#{inputStateJson} AS jsonb), 'RUNNING')
+    </insert>
+
+    <update id="finishNodeExec">
+        UPDATE flow_node_exec
+        SET output_update = CAST(#{outputUpdateJson} AS jsonb),
+            status        = #{status},
+            error_msg     = #{errorMsg},
+            latency_ms    = #{latencyMs},
+            finished_at   = now()
+        WHERE exec_id = #{execId}
+    </update>
+
+    <select id="listNodeExecs" resultType="java.util.LinkedHashMap">
+        SELECT exec_id, seq, node_id, node_type, input_state::text AS input_state,
+               output_update::text AS output_update, status, error_msg, latency_ms, started_at
+        FROM flow_node_exec
+        WHERE turn_id = #{turnId}
+        ORDER BY seq
+    </select>
+
+</mapper>

@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.example.smartflow.trace.TurnMapper">
+
+    <insert id="insertTurn">
+        INSERT INTO flow_turn (turn_id, session_id, seq, user_input, state_before, status)
+        VALUES (#{turnId}, #{sessionId}, #{seq}, #{userInput}, CAST(#{stateBeforeJson} AS jsonb), 'RUNNING')
+    </insert>
+
+    <update id="finishTurn">
+        UPDATE flow_turn
+        SET final_reply  = #{finalReply},
+            route_action = #{routeAction},
+            route_target = #{routeTarget},
+            node_path    = CAST(#{nodePathJson} AS jsonb),
+            state_after  = CAST(#{stateAfterJson} AS jsonb),
+            status       = #{status},
+            error_msg    = #{errorMsg},
+            latency_ms   = #{latencyMs},
+            finished_at  = now()
+        WHERE turn_id = #{turnId}
+    </update>
+
+    <select id="listTurns" resultType="java.util.LinkedHashMap">
+        SELECT turn_id, seq, user_input, final_reply, route_action, route_target,
+               node_path::text AS node_path, status, error_msg, latency_ms, started_at
+        FROM flow_turn
+        WHERE session_id = #{sessionId}
+        ORDER BY seq
+    </select>
+
+    <select id="getTurn" resultType="java.util.LinkedHashMap">
+        SELECT turn_id, session_id, seq, user_input, final_reply, route_action, route_target,
+               node_path::text AS node_path, state_before::text AS state_before,
+               state_after::text AS state_after, status, error_msg, latency_ms, started_at
+        FROM flow_turn
+        WHERE turn_id = #{turnId}
+    </select>
+
+</mapper>

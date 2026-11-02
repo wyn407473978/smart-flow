@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.example.smartflow.trace.LlmCallMapper">
+
+    <insert id="insertLlmCall">
+        INSERT INTO flow_llm_call (call_id, turn_id, session_id, exec_id, node_id, purpose,
+                                   provider, model_name, streaming, request_body, status)
+        VALUES (#{callId}, #{turnId}, #{sessionId}, #{execId}, #{nodeId}, #{purpose},
+                #{provider}, #{modelName}, #{streaming}, CAST(#{requestBodyJson} AS jsonb), 'RUNNING')
+    </insert>
+
+    <update id="finishLlmCall">
+        UPDATE flow_llm_call
+        SET response_body = CAST(#{responseBodyJson} AS jsonb),
+            response_text = #{responseText},
+            input_tokens  = #{inputTokens},
+            output_tokens = #{outputTokens},
+            total_tokens  = #{totalTokens},
+            finish_reason = #{finishReason},
+            status        = #{status},
+            error_msg     = #{errorMsg},
+            latency_ms    = #{latencyMs},
+            finished_at   = now()
+        WHERE call_id = #{callId}
+    </update>
+
+    <select id="listLlmCalls" resultType="java.util.LinkedHashMap">
+        SELECT call_id, exec_id, node_id, purpose, provider, model_name, streaming,
+               request_body::text AS request_body, response_body::text AS response_body,
+               response_text, input_tokens, output_tokens, total_tokens, finish_reason,
+               status, error_msg, latency_ms, started_at
+        FROM flow_llm_call
+        WHERE turn_id = #{turnId}
+        ORDER BY started_at
+    </select>
+
+</mapper>

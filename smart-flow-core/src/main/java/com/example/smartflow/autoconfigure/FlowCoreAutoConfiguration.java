@@ -3,7 +3,10 @@ package com.example.smartflow.autoconfigure;
 import com.example.smartflow.config.FlowProperties;
 import com.example.smartflow.memory.MemoryMapper;
 import com.example.smartflow.session.SessionMapper;
-import com.example.smartflow.trace.TraceMapper;
+import com.example.smartflow.trace.LlmCallMapper;
+import com.example.smartflow.trace.NodeExecMapper;
+import com.example.smartflow.trace.ToolCallMapper;
+import com.example.smartflow.trace.TurnMapper;
 import org.mybatis.spring.SqlSessionTemplate;
 import org.mybatis.spring.boot.autoconfigure.ConfigurationCustomizer;
 import org.mybatis.spring.boot.autoconfigure.MybatisAutoConfiguration;
@@ -21,7 +24,7 @@ import java.util.List;
  * <ul>
  *   <li>配置项 {@code flow.*}（{@link FlowProperties}）</li>
  *   <li>引擎、根路由节点、路由目录、记忆、trace、模型等框架 Bean</li>
- *   <li>框架自己的三个 MyBatis Mapper（会话、记忆、trace）</li>
+ *   <li>框架自己的 MyBatis Mapper（会话、记忆，以及按表拆分的执行记录）</li>
  * </ul>
  * 业务节点（继承 AbstractNode 的 @Component）放在业务工程自己的包里，由业务工程的 @SpringBootApplication 扫描。
  */
@@ -40,7 +43,9 @@ import java.util.List;
 public class FlowCoreAutoConfiguration {
 
     /** 框架自己的 Mapper，SQL 写在与接口同路径的 XML 里（例如 com/example/smartflow/session/SessionMapper.xml） */
-    static final List<Class<?>> FRAMEWORK_MAPPERS = List.of(SessionMapper.class, MemoryMapper.class, TraceMapper.class);
+    static final List<Class<?>> FRAMEWORK_MAPPERS = List.of(
+            SessionMapper.class, MemoryMapper.class,
+            TurnMapper.class, NodeExecMapper.class, LlmCallMapper.class, ToolCallMapper.class);
 
     /**
      * 框架 Mapper 直接注册进 MyBatis 配置，不用 @MapperScan：
@@ -72,7 +77,22 @@ public class FlowCoreAutoConfiguration {
     }
 
     @Bean
-    public TraceMapper traceMapper(SqlSessionTemplate sqlSessionTemplate) {
-        return sqlSessionTemplate.getMapper(TraceMapper.class);
+    public TurnMapper turnMapper(SqlSessionTemplate sqlSessionTemplate) {
+        return sqlSessionTemplate.getMapper(TurnMapper.class);
+    }
+
+    @Bean
+    public NodeExecMapper nodeExecMapper(SqlSessionTemplate sqlSessionTemplate) {
+        return sqlSessionTemplate.getMapper(NodeExecMapper.class);
+    }
+
+    @Bean
+    public LlmCallMapper llmCallMapper(SqlSessionTemplate sqlSessionTemplate) {
+        return sqlSessionTemplate.getMapper(LlmCallMapper.class);
+    }
+
+    @Bean
+    public ToolCallMapper toolCallMapper(SqlSessionTemplate sqlSessionTemplate) {
+        return sqlSessionTemplate.getMapper(ToolCallMapper.class);
     }
 }
