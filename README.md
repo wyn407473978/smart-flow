@@ -67,11 +67,12 @@ smart-flow-core/src/main/java/com/example/smartflow/
   config/         配置项 FlowProperties（flow.*）、模型、图定义
   flow/           图状态 FlowState、任务帧 TaskFrame、路由结果、框架常量 FlowNames
   node/           AbstractNode 基类、根路由 RouterNode、NodeType、HistoryPolicy；route/ 路由声明与目录
+  llm/            模型注册表、NodeModelClient（调用追踪、JSON 重试、流式输出）
   engine/         WorkflowEngine（每轮入口）、轮次上下文、推送事件
-  memory/         滚动摘要、长期记忆（MemoryRepository → MemoryMapper）
+  memory/         NodeContextBuilder（历史窗口与记忆上下文）、滚动摘要、长期记忆（MemoryRepository → MemoryMapper）
   session/        会话状态、消息存取（SessionRepository → SessionMapper）
   trace/          轮次 / 节点 / 模型调用 / 工具调用 记录；ChatModelListener（TraceRepository → TraceMapper）
-  tool/           工具接口 FlowTool
+  tool/           FlowTool、内置 AskUserTool、ToolLoopRunner（工具循环和调用记录）、工具调试说明
 smart-flow-core/src/main/resources/
   com/example/smartflow/**/*Mapper.xml   MyBatis SQL，和 Mapper 接口同路径
   db/smart-flow-schema.sql               建表脚本
@@ -146,6 +147,8 @@ public class ComplaintNode extends AbstractNode {
 1. 需要调模型时用基类方法：`chatJson(...)`（结构化输出，自带一次纠错重试）、`streamReply(...)`（流式回复）、`emitText(...)`（固定文案）
 2. 返回值里只放要更新的状态 key；回复放 `FlowState.REPLIES`
 3. 放进状态的对象必须实现 `Serializable`（LangGraph4j 在节点间会克隆状态）；从状态取出的 `TaskFrame` 先 `copy()` 再改
+
+`AbstractNode` 负责节点执行生命周期、追问状态及便捷入口。模型调用委托给 `NodeModelClient`，工具循环委托给 `ToolLoopRunner`，历史窗口和记忆组装委托给 `NodeContextBuilder`；三个组件由 `NodeSupport` 创建并复用。子类仍使用原来的基类方法，也可以继续覆盖 `chat`、`traceOptions`、`historyPolicy` 和 `window`。
 
 **怎么确认子节点注册成功**：打开测试页面的「节点 / 提示词」页签（接口 `GET /api/nodes`）。
 - 「注册关系」表列出每个路由节点下挂了哪些子节点，✓ 表示该子节点的意图已经出现在父节点的提示词里

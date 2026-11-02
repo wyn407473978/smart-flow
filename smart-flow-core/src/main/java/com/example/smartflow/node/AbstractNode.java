@@ -5,44 +5,27 @@ import com.example.smartflow.engine.TurnEvent;
 import com.example.smartflow.flow.FlowNames;
 import com.example.smartflow.flow.FlowState;
 import com.example.smartflow.flow.HistoryMessage;
-import com.example.smartflow.flow.MemoryFact;
-import com.example.smartflow.flow.ToolFact;
-import com.example.smartflow.memory.TokenEstimator;
 import com.example.smartflow.flow.TaskFrame;
-import com.example.smartflow.llm.LlmJson;
 import com.example.smartflow.node.route.RouteSpec;
-import com.example.smartflow.tool.AskUserTool;
 import com.example.smartflow.tool.FlowTool;
-import com.example.smartflow.trace.TraceKeys;
-import dev.langchain4j.agent.tool.ToolExecutionRequest;
-import dev.langchain4j.agent.tool.ToolSpecification;
-import dev.langchain4j.data.message.AiMessage;
+import com.example.smartflow.tool.ToolDescriptions;
 import dev.langchain4j.data.message.ChatMessage;
 import dev.langchain4j.data.message.SystemMessage;
-import dev.langchain4j.data.message.ToolExecutionResultMessage;
-import dev.langchain4j.data.message.UserMessage;
 import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.chat.ChatRequestOptions;
 import dev.langchain4j.model.chat.request.ChatRequest;
-import dev.langchain4j.model.chat.request.ResponseFormat;
-import dev.langchain4j.model.chat.request.json.JsonObjectSchema;
 import dev.langchain4j.model.chat.response.ChatResponse;
-import dev.langchain4j.model.chat.response.StreamingChatResponseHandler;
 import org.bsc.langgraph4j.action.NodeAction;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.Set;
 import java.util.UUID;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.TimeUnit;
 
 /**
  * 所有工作流节点的基类。
@@ -51,10 +34,8 @@ import java.util.concurrent.TimeUnit;
  * <ul>
  *   <li>节点执行记录（flow_node_exec：输入状态、输出更新、耗时、异常）</li>
  *   <li>节点开始 / 结束事件推送</li>
- *   <li>模型调用：自动带上 trace 上下文，由 TraceChatModelListener 落库真实请求和响应</li>
- *   <li>JSON 结构化调用（解析失败自动纠错重试一次）</li>
- *   <li>流式回复（token 实时推给前端）</li>
- *   <li>历史消息转换、回复写入状态</li>
+ *   <li>状态更新与追问等待状态管理</li>
+ *   <li>提供模型调用、工具循环和上下文组装的便捷入口，具体实现委托给 NodeSupport 中的组件</li>
  * </ul>
  * 子类只实现 {@link #execute(FlowState, NodeScope)}。
  */
@@ -164,22 +145,12 @@ public abstract class AbstractNode implements NodeAction<FlowState> {
 
     /** @param callId 预先指定的模型调用 ID，为 null 时由 listener 生成 */
     protected ChatRequestOptions traceOptions(NodeScope scope, String purpose, boolean streaming, String callId) {
-        ChatRequestOptions.Builder b = ChatRequestOptions.builder()
-                .addListenerAttribute(TraceKeys.TURN_ID, scope.turn().turnId())
-                .addListenerAttribute(TraceKeys.SESSION_ID, scope.turn().sessionId())
-                .addListenerAttribute(TraceKeys.EXEC_ID, scope.execId())
-                .addListenerAttribute(TraceKeys.NODE_ID, scope.nodeId())
-                .addListenerAttribute(TraceKeys.PURPOSE, purpose)
-                .addListenerAttribute(TraceKeys.STREAMING, streaming);
-        if (callId != null) {
-            b.addListenerAttribute(TraceKeys.CALL_ID, callId);
-        }
-        return b.build();
+        return support.modelClient().traceOptions(scope, purpose, streaming, callId);
     }
 
     /** 普通（非流式）调用 */
     protected ChatResponse chat(NodeScope scope, String purpose, ChatModel model, ChatRequest request) {
-        return model.chat(request, traceOptions(scope, purpose, false));
+        return support.modelClient().chat(model, request, traceOptions(scope, purpose, false));
     }
 
     /**
@@ -191,37 +162,30 @@ public abstract class AbstractNode implements NodeAction<FlowState> {
      */
     protected <T> T chatJson(NodeScope scope, String purpose, ChatModel model,
                              List<ChatMessage> messages, Class<T> type) {
-        List<ChatMessage> msgs = new ArrayList<>(messages);
-        Exception last = null;
-        String lastText = null;
-        for (int attempt = 1; attempt <= 2; attempt++) {
-            ChatRequest request = ChatRequest.builder()
-                    .messages(msgs)
-                    .responseFormat(ResponseFormat.JSON)
-                    .temperature(0.0)
-                    .build();
-            ChatResponse response = chat(scope, attempt == 1 ? purpose : purpose + "#retry", model, request);
-            lastText = response.aiMessage().text();
-            try {
-                return support.llmJsonMapper().readValue(stripCodeFence(lastText), type);
-            } catch (Exception e) {
-                last = e;
-                log.warn("模型 JSON 解析失败 node={} purpose={} attempt={} text={}", id(), purpose, attempt, lastText);
-                msgs.add(response.aiMessage());
-                msgs.add(UserMessage.from("你上面的输出不是合法的 JSON。请只输出符合要求的 JSON 对象，不要包含任何其他文字。"));
-            }
+        try {
+            return support.modelClient().chatJson(scope, purpose, messages, type,
+                    (callPurpose, request) -> chat(scope, callPurpose, model, request));
+        } catch (com.example.smartflow.llm.LlmJsonException e) {
+            // 保留节点原有的异常契约，已有子类仍可捕获 AbstractNode.LlmJsonException。
+            throw new LlmJsonException(purpose, e.lastOutput(), e.getCause());
         }
-        throw new LlmJsonException(purpose, lastText, last);
     }
 
     /**
      * 流式生成回复：token 实时推给前端，返回完整文本。调用方负责把返回值写进状态（{@link #reply(String)}）。
      */
     protected String streamReply(NodeScope scope, String purpose, List<ChatMessage> messages) throws Exception {
-        StringBuilder text = new StringBuilder();
-        streamChat(scope, purpose, ChatRequest.builder().messages(messages).build(), null, text);
-        return text.toString();
+        return support.modelClient().streamReply(scope, messages, traceOptions(scope, purpose, true, null));
     }
+
+    /** 不经过模型的固定回复（例如确认文案、校验提示），同样以 token 事件推给前端 */
+    protected String emitText(NodeScope scope, String text) {
+        return support.modelClient().emitText(scope, text);
+    }
+
+    // =====================================================================
+    // 工具循环
+    // =====================================================================
 
     /**
      * tool loop 的结果。
@@ -248,64 +212,14 @@ public abstract class AbstractNode implements NodeAction<FlowState> {
      */
     protected ToolLoopResult streamWithTools(NodeScope scope, String purpose, List<ChatMessage> messages,
                                              List<FlowTool> tools, int maxRounds) throws Exception {
-        Map<String, FlowTool> byName = new LinkedHashMap<>();
-        for (FlowTool tool : tools) {
-            byName.put(tool.name(), tool);
-        }
-        byName.put(AskUserTool.NAME, AskUserTool.INSTANCE);
-        List<ToolSpecification> specs = byName.values().stream().map(FlowTool::specification).toList();
-
-        List<ChatMessage> msgs = new ArrayList<>(messages);
-        StringBuilder text = new StringBuilder();
-        for (int round = 1; round <= maxRounds; round++) {
-            String callId = UUID.randomUUID().toString();
-            int roundStart = text.length();
-            ChatRequest request = ChatRequest.builder().messages(msgs).toolSpecifications(specs).build();
-            AiMessage ai = streamChat(scope, round == 1 ? purpose : purpose + "#" + round, request, callId, text)
-                    .aiMessage();
-            if (!ai.hasToolExecutionRequests()) {
-                return new ToolLoopResult(text.toString(), null);
-            }
-
-            Optional<ToolExecutionRequest> ask = ai.toolExecutionRequests().stream()
-                    .filter(c -> AskUserTool.NAME.equals(c.name())).findFirst();
-            if (ask.isPresent()) {
-                if (ai.toolExecutionRequests().size() > 1) {
-                    log.warn("节点 {} 在同一轮里既调用了 ask_user 又调用了其他工具，其他工具被忽略", id());
-                }
-                runTool(scope, callId, ask.get(), byName);
-                String roundText = text.substring(roundStart).strip();
-                String question = askUserQuestion(ask.get());
-                if (roundText.isEmpty()) {
-                    // 正常情况：问题在工具参数里，推给用户
-                    appendRoundText(scope, text, question);
-                } else if (question.isBlank()) {
-                    // 模型把问题写在了正文里
-                    question = roundText;
-                }
-                return new ToolLoopResult(text.toString(), question.isBlank() ? text.toString().strip() : question);
-            }
-
-            msgs.add(ai);
-            for (ToolExecutionRequest call : ai.toolExecutionRequests()) {
-                msgs.add(ToolExecutionResultMessage.from(call, runTool(scope, callId, call, byName)));
-            }
-        }
-        log.warn("节点 {} 工具调用超过 {} 轮，强制结束", id(), maxRounds);
-        String giveUp = "抱歉，这个问题需要的查询步骤太多，我暂时没能完成，可以换个问法再试试。";
-        appendRoundText(scope, text, giveUp);
-        return new ToolLoopResult(text.toString(), null);
+        var result = support.toolLoopRunner().run(scope, purpose, messages, tools, maxRounds,
+                (callPurpose, callId) -> traceOptions(scope, callPurpose, true, callId));
+        return new ToolLoopResult(result.text(), result.question());
     }
 
-    private String askUserQuestion(ToolExecutionRequest call) {
-        try {
-            Map<String, Object> args = support.llmJsonMapper().readValue(blankToEmptyJson(call.arguments()),
-                    new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() { });
-            Object q = args == null ? null : args.get("question");
-            return q == null ? "" : q.toString().strip();
-        } catch (Exception e) {
-            return "";
-        }
+    /** 把工具定义渲染成可读文本，给调试页面展示"这个节点挂了哪些工具" */
+    protected static String describeTools(List<FlowTool> tools) {
+        return ToolDescriptions.describe(tools);
     }
 
     // ------------------------------------------------------------------ 追问帧
@@ -340,132 +254,9 @@ public abstract class AbstractNode implements NodeAction<FlowState> {
         updates.put(FlowState.TASK_STACK, stack);
     }
 
-    /** 执行一次工具调用并落库。工具出错时把错误信息返回给模型，让它自己决定怎么回复用户 */
-    private String runTool(NodeScope scope, String llmCallId, ToolExecutionRequest call, Map<String, FlowTool> tools) {
-        String toolCallId = UUID.randomUUID().toString();
-        long start = System.nanoTime();
-        support.trace().insertToolCall(toolCallId, scope.turn().turnId(), scope.turn().sessionId(), scope.execId(),
-                llmCallId, id(), call.name(), blankToEmptyJson(call.arguments()));
-        String status = "SUCCESS";
-        String error = null;
-        String result;
-        try {
-            FlowTool tool = tools.get(call.name());
-            if (tool == null) {
-                throw new IllegalArgumentException("工具不存在: " + call.name());
-            }
-            Map<String, Object> args = support.llmJsonMapper().readValue(blankToEmptyJson(call.arguments()),
-                    new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() { });
-            result = tool.execute(args == null ? Map.of() : args,
-                    new FlowTool.ToolContext(scope.turn().sessionId(), scope.turn().turnId()));
-        } catch (Exception e) {
-            log.warn("工具执行失败 node={} tool={} args={}", id(), call.name(), call.arguments(), e);
-            status = "ERROR";
-            error = e.getClass().getSimpleName() + ": " + e.getMessage();
-            result = "{\"error\":\"工具执行失败：" + String.valueOf(e.getMessage()).replace("\"", "'") + "\"}";
-        }
-        long ms = (System.nanoTime() - start) / 1_000_000;
-        support.trace().finishToolCall(toolCallId, result, status, error, ms);
-        scope.turn().emit(TurnEvent.of("tool", "node", id(), "name", call.name(),
-                "arguments", call.arguments(), "result", result, "status", status, "latencyMs", ms));
-        return result;
-    }
-
-    /**
-     * 一次流式调用。token 实时推给前端，并追加到 text；同一个节点多轮输出之间用换行隔开。
-     *
-     * @param callId 预先指定的模型调用 ID（工具调用要关联到它），为 null 时由 listener 生成
-     */
-    private ChatResponse streamChat(NodeScope scope, String purpose, ChatRequest request, String callId,
-                                    StringBuilder text) throws Exception {
-        CompletableFuture<ChatResponse> done = new CompletableFuture<>();
-        ChatRequestOptions options = traceOptions(scope, purpose, true, callId);
-        boolean[] first = {true};
-        support.models().streaming().chat(request, options, new StreamingChatResponseHandler() {
-            @Override
-            public void onPartialResponse(String partial) {
-                if (partial == null || partial.isEmpty()) {
-                    return;
-                }
-                if (first[0]) {
-                    first[0] = false;
-                    beginRound(scope, text);
-                }
-                text.append(partial);
-                scope.turn().emitToken(partial);
-            }
-
-            @Override
-            public void onCompleteResponse(ChatResponse response) {
-                done.complete(response);
-            }
-
-            @Override
-            public void onError(Throwable error) {
-                done.completeExceptionally(error);
-            }
-        });
-        int timeout = support.props().model().timeoutSeconds() == null ? 60 : support.props().model().timeoutSeconds();
-        return done.get(timeout + 10L, TimeUnit.SECONDS);
-    }
-
-    /** 本节点开始输出新一段文字：第一段前处理节点间分隔，后续段前加换行 */
-    private static void beginRound(NodeScope scope, StringBuilder text) {
-        if (text.isEmpty()) {
-            scope.turn().beginReply();
-        } else if (text.charAt(text.length() - 1) != '\n') {
-            text.append('\n');
-            scope.turn().emitToken("\n");
-        }
-    }
-
-    private static void appendRoundText(NodeScope scope, StringBuilder text, String s) {
-        beginRound(scope, text);
-        text.append(s);
-        scope.turn().emitToken(s);
-    }
-
-    /** 把工具定义渲染成可读文本，给调试页面展示"这个节点挂了哪些工具" */
-    protected static String describeTools(List<FlowTool> tools) {
-        StringBuilder sb = new StringBuilder();
-        for (FlowTool tool : tools) {
-            ToolSpecification spec = tool.specification();
-            sb.append(spec.name()).append("：").append(spec.description()).append('\n');
-            JsonObjectSchema params = spec.parameters();
-            if (params == null || params.properties() == null || params.properties().isEmpty()) {
-                sb.append("  参数：无\n");
-            } else {
-                List<String> required = params.required() == null ? List.of() : params.required();
-                params.properties().forEach((name, schema) -> sb.append("  - ").append(name)
-                        .append(required.contains(name) ? "（必填）" : "（可选）")
-                        .append("：").append(Optional.ofNullable(schema.description()).orElse("")).append('\n'));
-            }
-            sb.append('\n');
-        }
-        sb.append(AskUserTool.NAME).append("（内置，streamWithTools 自动挂载）：")
-                .append(AskUserTool.INSTANCE.specification().description());
-        return sb.toString().stripTrailing();
-    }
-
-    private static String blankToEmptyJson(String json) {
-        return json == null || json.isBlank() ? "{}" : json;
-    }
-
-    /** 不经过模型的固定回复（例如确认文案、校验提示），同样以 token 事件推给前端 */
-    protected String emitText(NodeScope scope, String text) {
-        scope.turn().beginReply();
-        scope.turn().emitToken(text);
-        return text;
-    }
-
     // =====================================================================
-    // 消息与状态辅助
+    // 历史与记忆
     // =====================================================================
-
-    // ------------------------------------------------------------------ 记忆
-
-    /** 工具结果放进提示词时每条最多保留的字数，避免一次查询返回大段数据把上下文撑爆 */
-    private static final int TOOL_RESULT_MAX_CHARS = 500;
 
     /**
      * 本节点要带多少记忆。默认值来自 flow.memory 配置：带摘要和长期记忆，不带工具结果。
@@ -475,27 +266,22 @@ public abstract class AbstractNode implements NodeAction<FlowState> {
      * </pre>
      */
     public HistoryPolicy historyPolicy() {
-        var m = support.props().memory();
-        return new HistoryPolicy(m.recentMessages(), m.maxHistoryTokens(), true, true, false);
+        return support.contextBuilder().defaultPolicy();
     }
 
     /** 按 {@link #historyPolicy()} 取历史消息，转换成 LangChain4j 消息 */
     protected List<ChatMessage> historyMessages(FlowState state) {
-        return toChatMessages(window(state, historyPolicy().maxMessages()));
+        return support.contextBuilder().toChatMessages(window(state, historyPolicy().maxMessages()));
     }
 
     /** 最多取最近 limit 条（同时受 token 上限约束） */
     protected List<ChatMessage> historyMessages(FlowState state, int limit) {
-        return toChatMessages(window(state, limit));
+        return support.contextBuilder().toChatMessages(window(state, limit));
     }
 
     /** 历史消息渲染成纯文本，放进路由、抽取这类提示词里 */
     protected String historyAsText(FlowState state, int limit) {
-        StringBuilder sb = new StringBuilder();
-        for (HistoryMessage m : window(state, limit)) {
-            sb.append(m.isUser() ? "用户：" : "助手：").append(m.content()).append('\n');
-        }
-        return sb.isEmpty() ? "（无）" : sb.toString();
+        return support.contextBuilder().historyAsText(window(state, limit));
     }
 
     /**
@@ -503,28 +289,7 @@ public abstract class AbstractNode implements NodeAction<FlowState> {
      * 至少保留最近一条（哪怕它自己就超了 token 上限），否则模型连上一句话都看不到。
      */
     protected List<HistoryMessage> window(FlowState state, int limit) {
-        List<HistoryMessage> history = state.history();
-        int budget = historyPolicy().maxTokens();
-        TokenEstimator estimator = support.tokenEstimator();
-        int used = 0;
-        int from = history.size();
-        while (from > 0 && history.size() - from < limit) {
-            int cost = estimator.estimate(history.get(from - 1).content());
-            if (from < history.size() && used + cost > budget) {
-                break;
-            }
-            used += cost;
-            from--;
-        }
-        return history.subList(from, history.size());
-    }
-
-    private static List<ChatMessage> toChatMessages(List<HistoryMessage> messages) {
-        List<ChatMessage> out = new ArrayList<>();
-        for (HistoryMessage m : messages) {
-            out.add(m.isUser() ? UserMessage.from(m.content()) : AiMessage.from(m.content()));
-        }
-        return out;
+        return support.contextBuilder().window(state, limit, historyPolicy());
     }
 
     /**
@@ -532,42 +297,14 @@ public abstract class AbstractNode implements NodeAction<FlowState> {
      * 什么都没有时返回空字符串。
      */
     protected String memoryBlock(FlowState state) {
-        HistoryPolicy p = historyPolicy();
-        StringBuilder sb = new StringBuilder();
-        if (p.includeUserMemory() && !state.userMemory().isEmpty()) {
-            sb.append("\n【关于用户的长期信息】（来自以往的对话，可能已经变化；和本轮对话冲突时以本轮为准，不要主动复述这些信息）\n");
-            for (MemoryFact f : state.userMemory()) {
-                sb.append("- ").append(f.key()).append("：").append(f.value()).append('\n');
-            }
-        }
-        if (p.includeSummary() && !state.summary().isBlank()) {
-            sb.append("\n【早期对话摘要】\n").append(state.summary().strip()).append('\n');
-        }
-        if (p.includeToolResults()) {
-            Set<String> inWindow = new HashSet<>();
-            for (HistoryMessage m : window(state, p.maxMessages())) {
-                if (m.turnId() != null) {
-                    inWindow.add(m.turnId());
-                }
-            }
-            List<ToolFact> facts = state.toolFacts().stream().filter(f -> inWindow.contains(f.turnId())).toList();
-            if (!facts.isEmpty()) {
-                sb.append("\n【最近查询到的数据】（之前的对话里查到的，用户追问时可以直接引用；需要新的数据时再调用工具）\n");
-                for (ToolFact f : facts) {
-                    sb.append("- ").append(f.toolName()).append('(').append(f.arguments() == null ? "" : f.arguments())
-                            .append(") → ").append(truncate(f.result(), TOOL_RESULT_MAX_CHARS)).append('\n');
-                }
-            }
-        }
-        return sb.toString();
+        HistoryPolicy policy = historyPolicy();
+        return support.contextBuilder().memoryBlock(state, policy,
+                policy.includeToolResults() ? window(state, policy.maxMessages()) : List.of());
     }
 
-    private static String truncate(String s, int max) {
-        if (s == null) {
-            return "";
-        }
-        return s.length() <= max ? s : s.substring(0, max) + "…（已截断）";
-    }
+    // =====================================================================
+    // 消息与状态辅助
+    // =====================================================================
 
     protected static SystemMessage system(String text) {
         return SystemMessage.from(text);
@@ -596,18 +333,14 @@ public abstract class AbstractNode implements NodeAction<FlowState> {
         return u;
     }
 
-    private static String stripCodeFence(String text) {
-        return LlmJson.stripCodeFence(text);
-    }
-
     private static long elapsedMs(long startNanos) {
         return (System.nanoTime() - startNanos) / 1_000_000;
     }
 
-    /** 模型多次输出非法 JSON */
-    public static class LlmJsonException extends RuntimeException {
+    /** 模型多次输出非法 JSON，保留此入口供已有节点捕获。 */
+    public static class LlmJsonException extends com.example.smartflow.llm.LlmJsonException {
         public LlmJsonException(String purpose, String lastOutput, Throwable cause) {
-            super("模型输出无法解析为 JSON, purpose=" + purpose + ", output=" + lastOutput, cause);
+            super(purpose, lastOutput, cause);
         }
     }
 }
