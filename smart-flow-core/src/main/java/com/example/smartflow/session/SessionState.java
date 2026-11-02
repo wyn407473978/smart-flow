@@ -17,7 +17,10 @@ public class SessionState {
 
     private List<TaskFrame> taskStack = new ArrayList<>();
 
-    public List<TaskFrame> getTaskStack() { return taskStack; }
+    public List<TaskFrame> getTaskStack() {
+        return taskStack;
+    }
+
     public void setTaskStack(List<TaskFrame> taskStack) {
         this.taskStack = taskStack == null ? new ArrayList<>() : new ArrayList<>(taskStack);
     }

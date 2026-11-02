@@ -11,6 +11,7 @@ import com.example.smartflow.memory.TokenEstimator;
 import com.example.smartflow.flow.TaskFrame;
 import com.example.smartflow.llm.LlmJson;
 import com.example.smartflow.node.route.RouteSpec;
+import com.example.smartflow.tool.AskUserTool;
 import com.example.smartflow.tool.FlowTool;
 import com.example.smartflow.trace.TraceKeys;
 import dev.langchain4j.agent.tool.ToolExecutionRequest;
@@ -116,8 +117,7 @@ public abstract class AbstractNode implements NodeAction<FlowState> {
         String execId = UUID.randomUUID().toString();
         long start = System.nanoTime();
 
-        support.trace().insertNodeExec(execId, turn.turnId(), turn.sessionId(), seq,
-                id(), type().name(), inputSnapshot(state));
+        support.trace().insertNodeExec(execId, turn.turnId(), turn.sessionId(), seq, id(), type().name(), inputSnapshot(state));
         turn.emit(TurnEvent.of("node_start", "node", id(), "type", type().name(), "seq", seq));
 
         try {
@@ -223,37 +223,6 @@ public abstract class AbstractNode implements NodeAction<FlowState> {
         return text.toString();
     }
 
-    /** 内置的"向用户提问"工具名 */
-    public static final String ASK_USER = "ask_user";
-
-    /**
-     * 内置工具：模型需要用户补充或确认信息时调用它，而不是直接在回复里提问。
-     * 这样代码能确切知道"这个节点在等用户回答"，下一轮路由会把用户的回答送回这个节点。
-     */
-    private static final ToolSpecification ASK_USER_SPEC = ToolSpecification.builder()
-            .name(ASK_USER)
-            .description("需要用户补充或确认信息才能继续时调用（例如查天气不知道城市、需要用户确认是不是某个城市）。"
-                    + "question 是要对用户说的话。调用后本轮结束，等用户回答。"
-                    + "调用这个工具时不要再输出其他文字，也不要在普通回复里向用户提问。")
-            .parameters(JsonObjectSchema.builder()
-                    .addStringProperty("question", "要问用户的话，简短、口语化")
-                    .required("question")
-                    .build())
-            .build();
-
-    /** 只用来让 ask_user 和普通工具走同一套落库逻辑 */
-    private static final FlowTool ASK_USER_TOOL = new FlowTool() {
-        @Override
-        public ToolSpecification specification() {
-            return ASK_USER_SPEC;
-        }
-
-        @Override
-        public String execute(Map<String, Object> arguments, ToolContext context) {
-            return "{\"status\":\"已向用户提问，等待回答\"}";
-        }
-    };
-
     /**
      * tool loop 的结果。
      *
@@ -283,7 +252,7 @@ public abstract class AbstractNode implements NodeAction<FlowState> {
         for (FlowTool tool : tools) {
             byName.put(tool.name(), tool);
         }
-        byName.put(ASK_USER, ASK_USER_TOOL);
+        byName.put(AskUserTool.NAME, AskUserTool.INSTANCE);
         List<ToolSpecification> specs = byName.values().stream().map(FlowTool::specification).toList();
 
         List<ChatMessage> msgs = new ArrayList<>(messages);
@@ -299,7 +268,7 @@ public abstract class AbstractNode implements NodeAction<FlowState> {
             }
 
             Optional<ToolExecutionRequest> ask = ai.toolExecutionRequests().stream()
-                    .filter(c -> ASK_USER.equals(c.name())).findFirst();
+                    .filter(c -> AskUserTool.NAME.equals(c.name())).findFirst();
             if (ask.isPresent()) {
                 if (ai.toolExecutionRequests().size() > 1) {
                     log.warn("节点 {} 在同一轮里既调用了 ask_user 又调用了其他工具，其他工具被忽略", id());
@@ -473,7 +442,8 @@ public abstract class AbstractNode implements NodeAction<FlowState> {
             }
             sb.append('\n');
         }
-        sb.append(ASK_USER).append("（内置，streamWithTools 自动挂载）：").append(ASK_USER_SPEC.description());
+        sb.append(AskUserTool.NAME).append("（内置，streamWithTools 自动挂载）：")
+                .append(AskUserTool.INSTANCE.specification().description());
         return sb.toString().stripTrailing();
     }
 
