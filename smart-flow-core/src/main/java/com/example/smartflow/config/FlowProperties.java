@@ -38,6 +38,7 @@ public record FlowProperties(Model model, Memory memory, Sse sse, Assistant assi
 
     /**
      * @param memoryModel 后台记忆任务（滚动摘要、长期记忆抽取）用的模型，不配置时用 routerModel
+     * @param reasoningEffort 思考强度，留空使用供应商默认值；DeepSeek 可用 none 关闭思考以降低延迟
      */
     public record Model(String baseUrl,
                         String apiKey,
@@ -46,13 +47,25 @@ public record FlowProperties(Model model, Memory memory, Sse sse, Assistant assi
                         Double temperature,
                         Integer timeoutSeconds,
                         Boolean logHttp,
-                        String memoryModel) {
+                        String memoryModel,
+                        String reasoningEffort) {
         /** record 有多个构造器时，必须标明配置绑定用哪个，否则 Spring Boot 不会绑定，整个配置为 null */
         @ConstructorBinding
         public Model {
+            if (reasoningEffort != null) {
+                reasoningEffort = reasoningEffort.strip();
+                if (reasoningEffort.isEmpty()) {
+                    reasoningEffort = null;
+                }
+            }
             if (memoryModel == null || memoryModel.isBlank()) {
                 memoryModel = routerModel;
             }
+        }
+
+        public Model(String baseUrl, String apiKey, String chatModel, String routerModel,
+                     Double temperature, Integer timeoutSeconds, Boolean logHttp, String memoryModel) {
+            this(baseUrl, apiKey, chatModel, routerModel, temperature, timeoutSeconds, logHttp, memoryModel, null);
         }
 
         public Model(String baseUrl, String apiKey, String chatModel, String routerModel,

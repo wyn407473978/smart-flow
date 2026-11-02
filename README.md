@@ -52,6 +52,20 @@ open http://localhost:8080/
 
 数据库地址、账号、模型名、助手人设（`flow.assistant`）都在 `smart-flow-demo/src/main/resources/application.yml` 里改。
 
+如果出现 `Authentication Fails (auth header format should be Bearer sk-...)`，先检查启动应用的进程是否读到了
+`DEEPSEEK_API_KEY`。命令行启动时，在同一个终端先执行上面的 `export` 再启动；IntelliJ IDEA 启动时，
+在 **Run → Edit Configurations → Environment variables** 中添加 `DEEPSEEK_API_KEY=你的真实 Key`，然后重启应用。
+终端里的 `export` 不会更新已经打开的 IDEA 的运行环境。也可以使用 Spring Boot 环境变量 `FLOW_MODEL_API_KEY`
+直接覆盖 `flow.model.api-key`。
+
+Key 只填原始值（例如 `sk-...`），SDK 会自动生成 `Authorization: Bearer ...` 请求头。
+框架会清理首尾空白和误带的 `Bearer` 前缀；Key 缺失或含非法空白时会直接阻止启动，并指出配置项。
+如果 Key 格式正确但仍返回 401，请检查是否为当前端点签发的有效 Key。
+
+Demo 的 `flow.model.reasoning-effort: none` 会关闭 DeepSeek 的思考模式，减少路由、槽位抽取和简短回复的等待时间，
+对主模型、路由、流式和记忆模型都生效。框架默认不设置该参数；删除配置即可恢复供应商默认值。
+切换其他兼容端点时，请确认它是否支持 `reasoning_effort`。调试页的模型请求参数中会记录实际使用的 `reasoningEffort`。
+
 非流式接口（方便 curl 和自动化评测）：
 
 ```bash

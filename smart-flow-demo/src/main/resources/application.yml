@@ -26,13 +26,17 @@ flow:
     name: 智慧民生助手
     persona: 语气亲切、简洁、专业，用中文回答
   model:
-    # 任意 OpenAI 协议兼容端点。默认是阿里云百炼的兼容模式
+    # 任意 OpenAI 协议兼容端点。默认是 DeepSeek
     base-url: https://api.deepseek.com
-    api-key: ${DEEPSEEK_API_KEY:}
+    # 必须在启动应用的进程中设置；只填 Key 本身，不需要 Bearer 前缀。缺失时启动失败并提示。
+    api-key: ${DS_API_KEY:}
     # 对话、槽位抽取用的主模型
     chat-model: deepseek-flash
     # 路由用的轻量模型（每轮都要调用，选便宜、快的）
     router-model: deepseek-flash
+    # 路由、槽位抽取、简短追问不需要深度思考；DeepSeek 默认会思考，显式关闭可降低延迟。
+    # 删除此项可恢复供应商默认行为；切换其他端点时请确认是否支持 reasoning_effort。
+    reasoning-effort: none
     # 后台记忆任务（滚动摘要、长期记忆抽取）用的模型，不配置时用 router-model
     # memory-model: deepseek-flash
     temperature: 0.3

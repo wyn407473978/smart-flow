@@ -15,6 +15,7 @@ import dev.langchain4j.model.chat.request.ChatRequest;
 import dev.langchain4j.model.chat.request.ChatRequestParameters;
 import dev.langchain4j.model.chat.response.ChatResponse;
 import dev.langchain4j.model.output.TokenUsage;
+import dev.langchain4j.model.openai.OpenAiChatRequestParameters;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -123,6 +124,9 @@ public class TraceChatModelListener implements ChatModelListener {
             params.put("topP", p.topP());
             params.put("maxOutputTokens", p.maxOutputTokens());
             params.put("responseFormat", p.responseFormat() == null ? null : p.responseFormat().type().name());
+            if (p instanceof OpenAiChatRequestParameters openAi) {
+                params.put("reasoningEffort", openAi.reasoningEffort());
+            }
             if (p.toolSpecifications() != null && !p.toolSpecifications().isEmpty()) {
                 ArrayNode tools = params.putArray("tools");
                 for (ToolSpecification spec : p.toolSpecifications()) {
