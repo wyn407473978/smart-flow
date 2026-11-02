@@ -1,6 +1,8 @@
 package com.example.smartflow.node.route;
 
+import com.example.smartflow.flow.TaskFrame;
 import com.example.smartflow.node.AbstractNode;
+import com.example.smartflow.node.slot.SlotFillingNode;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
@@ -87,6 +89,29 @@ public class RouteCatalog {
 
     public List<AbstractNode> nodes() {
         return List.copyOf(snapshot().nodes.values());
+    }
+
+    /** 当前任务入口到当前阶段的收集节点；不能跳到其他任务或尚未经过的阶段。 */
+    public List<SlotFillingNode> taskSlotStages(TaskFrame task) {
+        Snapshot s = snapshot();
+        RouteOption entry = s.taskEntries.get(task.getTaskType());
+        if (entry == null) {
+            return List.of();
+        }
+        List<SlotFillingNode> stages = new ArrayList<>();
+        Set<String> visited = new HashSet<>();
+        String nodeId = entry.nodeId();
+        while (nodeId != null && visited.add(nodeId)) {
+            AbstractNode node = s.nodes.get(nodeId);
+            if (node instanceof SlotFillingNode stage) {
+                stages.add(stage);
+            }
+            if (nodeId.equals(task.getCurrentNode())) {
+                return List.copyOf(stages);
+            }
+            nodeId = node instanceof SlotFillingNode stage ? stage.nextStage() : null;
+        }
+        return List.of();
     }
 
     /** 丢弃缓存，下次使用时重新读取节点列表（测试用；以后路由描述改成从后台配置读取时也用得上） */

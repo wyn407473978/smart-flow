@@ -571,15 +571,18 @@ class WorkflowScenarioTest {
 
     private static final String CONTINUE_ACTIVITY = "{\"action\":\"CONTINUE\",\"intent\":\"ACTIVITY_CREATE\",\"reason\":\"\"}";
 
-    /** 走到确认这一步：一句话说全目标人群（C1 收齐后同一轮进入 C2 追问），再补模版和时间（C2 收齐后进入 C3 展示确认内容） */
-    private void activityUntilConfirm(String sid) {
+    private void activityUntilTemplate(String sid) {
         routerScript.add("{\"action\":\"START\",\"intent\":\"ACTIVITY_CREATE\",\"reason\":\"\"}");
         extractScript.add("{\"ageMin\":60,\"gender\":\"FEMALE\",\"region\":\"阳光社区\"}");
         extractScript.add("{}");
         var r1 = turn(sid, "帮我办个活动，面向阳光社区60岁以上的女性",
                 List.of("router", "collect_target", "choose_template"), "choose_template");
         assertTrue(r1.reply().startsWith("好的，活动的目标人群确认为：60 岁及以上、女性、阳光社区。"), r1.reply());
+    }
 
+    /** 走到确认这一步：先收齐目标人群，再补模版和时间，进入 C3 展示确认内容。 */
+    private void activityUntilConfirm(String sid) {
+        activityUntilTemplate(sid);
         routerScript.add(CONTINUE_ACTIVITY);
         extractScript.add("{\"template\":\"敬老关爱\",\"activityTime\":\"下周六上午\"}");
         var r2 = turn(sid, "敬老关爱，下周六上午", List.of("router", "choose_template", "submit_activity"), "submit_activity");
@@ -589,6 +592,129 @@ class WorkflowScenarioTest {
         TaskFrame task = r2.state().getTaskStack().get(0);
         assertEquals("ELDERLY_CARE", task.getSlots().get("template"), "枚举存编码");
         assertTrue(task.getAwaiting() != null, "确认节点在等用户确认");
+    }
+
+    private static String editActivity(String... fields) {
+        return "{\"action\":\"CONTINUE\",\"intent\":\"ACTIVITY_CREATE\",\"editSlots\":["
+                + java.util.Arrays.stream(fields).map(f -> "\"" + f + "\"").collect(java.util.stream.Collectors.joining(","))
+                + "],\"reason\":\"修改任务信息\"}";
+    }
+
+    @Test
+    void regionEditWaitsForNewValueAndPersistsAcrossDigression() {
+        activityUntilTemplate("edit-region");
+        String taskId = sessions.find("edit-region").orElseThrow().state().getTaskStack().get(0).getTaskId();
+
+        routerScript.add(editActivity("region"));
+        extractScript.add("{}");
+        var ask = turn("edit-region", "我想修改区域", List.of("router", "collect_target"), "collect_target");
+        TaskFrame waiting = ask.state().getTaskStack().get(0);
+        assertEquals("阳光社区", waiting.getSlots().get("region"), "未提供新值时保留旧区域");
+        assertEquals(List.of("region"), waiting.getEditingSlots());
+        assertTrue(last(systemPrompts.get("ask")).contains("用户要求修改但尚未收到有效新内容：目标区域或社区"));
+        assertTrue(last(routerInputs).contains("region（目标区域或社区）"));
+        assertFalse(last(routerInputs).contains("ageUnlimited（"), "辅助抽取字段不能作为待修改槽位");
+
+        routerScript.add(CHAT_START);
+        turn("edit-region", "你是谁", List.of("router", "chat"), "collect_target");
+        assertEquals(List.of("region"), sessions.find("edit-region").orElseThrow().state().getTaskStack().get(0).getEditingSlots());
+
+        routerScript.add(CONTINUE_ACTIVITY);
+        extractScript.add("{\"region\":\"杭州市西湖区\"}");
+        extractScript.add("{}");
+        var changed = turn("edit-region", "杭州市西湖区",
+                List.of("router", "collect_target", "choose_template"), "choose_template");
+        TaskFrame saved = sessions.find("edit-region").orElseThrow().state().getTaskStack().get(0);
+        assertEquals(Map.of("ageMin", 60, "gender", "FEMALE", "region", "杭州市西湖区"), saved.getSlots());
+        assertEquals(taskId, saved.getTaskId(), "修改原任务，不创建新任务");
+        assertTrue(saved.getEditingSlots().isEmpty());
+        assertTrue(changed.reply().contains("杭州市西湖区"), changed.reply());
+        assertFalse(changed.reply().contains("阳光社区"), changed.reply());
+    }
+
+    @Test
+    void directRegionEditReturnsToItsOwningStage() {
+        activityUntilTemplate("edit-direct");
+        // 发版前已经保存的会话不含新字段，也必须能继续修改。
+        sessions.states.compute("edit-direct", (sid, json) -> json.replace(",\"editingSlots\":[]", ""));
+        assertFalse(sessions.states.get("edit-direct").contains("editingSlots"));
+        routerScript.add(editActivity("region"));
+        extractScript.add("{\"region\":\"杭州市西湖区\"}");
+        extractScript.add("{}");
+        turn("edit-direct", "区域改成杭州市西湖区", List.of("router", "collect_target", "choose_template"), "choose_template");
+        assertEquals("杭州市西湖区", sessions.find("edit-direct").orElseThrow().state().getTaskStack().get(0).getSlots().get("region"));
+    }
+
+    @Test
+    void invalidOrEmptyEditKeepsOldValueAndContinuesWaiting() {
+        activityUntilTemplate("edit-invalid");
+        for (String extracted : List.of("{\"region\":\"" + "区".repeat(51) + "\"}", "{\"region\":\" \"}", "{}")) {
+            routerScript.add(editActivity("region"));
+            extractScript.add(extracted);
+            var result = turn("edit-invalid", "修改区域", List.of("router", "collect_target"), "collect_target");
+            TaskFrame saved = sessions.find("edit-invalid").orElseThrow().state().getTaskStack().get(0);
+            assertEquals("阳光社区", saved.getSlots().get("region"));
+            assertEquals(List.of("region"), saved.getEditingSlots());
+            assertFalse(result.reply().contains("目标人群确认为"), "无有效新值不能确认完成");
+        }
+        routerScript.add(CONTINUE_ACTIVITY);
+        extractScript.add("bad json");
+        extractScript.add("still bad json");
+        var failed = turn("edit-invalid", "新区域", List.of("router", "collect_target"), "collect_target");
+        assertEquals(List.of("region"), failed.state().getTaskStack().get(0).getEditingSlots());
+        assertEquals("阳光社区", failed.state().getTaskStack().get(0).getSlots().get("region"));
+        // 用户重新确认原值，也算提供了有效内容，不能无限追问。
+        routerScript.add(CONTINUE_ACTIVITY);
+        extractScript.add("{\"region\":\"阳光社区\"}");
+        extractScript.add("{}");
+        var same = turn("edit-invalid", "还是阳光社区吧", List.of("router", "collect_target", "choose_template"), "choose_template");
+        assertTrue(same.state().getTaskStack().get(0).getEditingSlots().isEmpty());
+    }
+
+    @Test
+    void editsAcrossStagesUseTheirOwnValidationAndReconfirmBeforeCommit() {
+        activityUntilConfirm("edit-multi");
+        routerScript.add(editActivity("region", "activityTime"));
+        extractScript.add("{\"region\":\"杭州市西湖区\"}");
+        extractScript.add("{\"activityTime\":\"下周日上午\"}");
+        var changed = turn("edit-multi", "区域改到杭州市西湖区，时间改成下周日上午",
+                List.of("router", "collect_target", "choose_template", "submit_activity"), "submit_activity");
+        TaskFrame task = sessions.find("edit-multi").orElseThrow().state().getTaskStack().get(0);
+        assertEquals("杭州市西湖区", task.getSlots().get("region"));
+        assertEquals("下周日上午", task.getSlots().get("activityTime"));
+        assertEquals("ELDERLY_CARE", task.getSlots().get("template"));
+        assertTrue(task.getEditingSlots().isEmpty());
+        assertTrue(changed.reply().contains("请确认以下信息："));
+        assertFalse(changed.reply().contains("活动已创建成功"));
+    }
+
+    @Test
+    void invalidEditNamesCannotRouteOutsideCurrentTask() {
+        activityUntilTemplate("edit-unknown");
+        routerScript.add(editActivity("submit_activity", "phone", "ageUnlimited"));
+        extractScript.add("{}");
+        var result = turn("edit-unknown", "修改信息", List.of("router", "choose_template"), "choose_template");
+        assertTrue(result.state().getTaskStack().get(0).getEditingSlots().isEmpty());
+        assertEquals("阳光社区", result.state().getTaskStack().get(0).getSlots().get("region"));
+    }
+
+    @Test
+    void ageEditStillUsesNormalizationAndCrossFieldValidation() {
+        activityUntilTemplate("edit-age");
+        routerScript.add(editActivity("ageMin", "ageMax"));
+        extractScript.add("{\"ageMin\":80,\"ageMax\":60}");
+        var rejected = turn("edit-age", "改成80到60岁", List.of("router", "collect_target"), "collect_target");
+        assertEquals(60, rejected.state().getTaskStack().get(0).getSlots().get("ageMin"));
+        assertEquals(List.of("ageMin", "ageMax"), rejected.state().getTaskStack().get(0).getEditingSlots());
+
+        routerScript.add(CONTINUE_ACTIVITY);
+        extractScript.add("{\"ageMin\":70}");
+        extractScript.add("{}");
+        var changed = turn("edit-age", "70岁以上", List.of("router", "collect_target", "choose_template"), "choose_template");
+        TaskFrame task = changed.state().getTaskStack().get(0);
+        assertEquals(70, task.getSlots().get("ageMin"));
+        assertFalse(task.getSlots().containsKey("ageMax"));
+        assertTrue(task.getEditingSlots().isEmpty(), "整体替换年龄范围，清空的上限也不再等待修改");
     }
 
     @Test

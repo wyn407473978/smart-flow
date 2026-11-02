@@ -24,7 +24,7 @@ core 和 web 都是 Spring Boot 自动配置（`FlowCoreAutoConfiguration`、`Fl
 
 | 节点 | ID | 类型 | 说明 |
 |---|---|---|---|
-| A 路由 | `router` | ROUTER | 每轮必经。提示词由子节点的路由声明自动拼成；模型判断 action + intent，去向和任务栈变化由代码决定 |
+| A 路由 | `router` | ROUTER | 每轮必经。提示词由子节点的路由声明自动拼成；模型判断 action + intent + 待修改字段，去向和任务栈变化由代码决定 |
 | B2 业务查询 | `biz_query` | TOOL_AGENT | 挂载 `get_weather`（查天气，演示数据）、`get_user_info`（查本人信息：rise / 27 岁）；手写 tool loop，流式输出 |
 | B3 闲聊 | `chat` | CHAT | 流式回复；根路由的兜底节点 |
 | C1 目标人群 | `collect_target` | SLOT_FILLING | 活动创建任务的入口。`SlotFillingNode`：年龄范围 / 性别 / 区域，收齐则同一轮进入 C2，否则流式追问 |
@@ -151,6 +151,10 @@ public class ComplaintNode extends AbstractNode {
 再 `writeTo(updates)`；要在本轮内继续执行下一阶段还需要 `goTo(updates, 下一阶段)`。
 任务阶段节点的 `stageDescription()` 会告诉路由模型"现在在等用户提供什么"，提高短回答（例如"女性"）判成 CONTINUE 的准确率；
 `SlotFillingNode` 默认用 `stageGoal()`，`ConfirmNode` 默认是"等用户确认"。
+
+任务进入后续阶段后仍可修改前面阶段的信息：路由根据 `editSlots` 回到字段所属的收集节点。
+例如 C2 中说“我想修改区域”，会回到 C1 追问新区域；旧区域暂时保留，待用户提供的新值通过校验后才替换，随后继续 C2。
+待修改字段保存在任务帧的 `editingSlots` 中，跨轮、插话后仍会保留；不会因为旧值已经填过而跳过修改。
 
 自动完成的事情：
 - 路由提示词的模块列表、兜底意图（`IntentRouterNode.systemPrompt()` 可以直接打印出来看）

@@ -4,7 +4,9 @@ import com.fasterxml.jackson.annotation.JsonIgnore;
 
 import java.io.Serial;
 import java.io.Serializable;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
@@ -36,6 +38,8 @@ public class TaskFrame implements Serializable {
     private boolean ephemeral;
     /** 正在等用户回答什么（追问的原话），路由判断用户回复是否在回答它时使用 */
     private String awaiting;
+    /** 用户要求修改但尚未提供有效新值的槽位；保留旧值，补充成功后再移除。 */
+    private List<String> editingSlots = new ArrayList<>();
 
     public TaskFrame() {
     }
@@ -66,6 +70,7 @@ public class TaskFrame implements Serializable {
         f.currentNode = currentNode;
         f.status = status;
         f.slots = new LinkedHashMap<>(slots);
+        f.editingSlots = new ArrayList<>(editingSlots);
         return f;
     }
 
@@ -91,6 +96,11 @@ public class TaskFrame implements Serializable {
 
     public String getAwaiting() { return awaiting; }
     public void setAwaiting(String awaiting) { this.awaiting = awaiting; }
+
+    public List<String> getEditingSlots() { return editingSlots; }
+    public void setEditingSlots(List<String> editingSlots) {
+        this.editingSlots = editingSlots == null ? new ArrayList<>() : new ArrayList<>(editingSlots);
+    }
 
     public Map<String, Object> getSlots() { return slots; }
     public void setSlots(Map<String, Object> slots) {

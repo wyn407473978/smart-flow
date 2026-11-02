@@ -12,6 +12,7 @@ import com.example.smartflow.node.NodeScope;
 import com.example.smartflow.node.NodeSupport;
 import com.example.smartflow.node.NodeType;
 import com.example.smartflow.node.route.RouteCatalog.RouteOption;
+import com.example.smartflow.node.slot.SlotFillingNode;
 import dev.langchain4j.data.message.ChatMessage;
 import dev.langchain4j.data.message.UserMessage;
 
@@ -28,7 +29,7 @@ import java.util.stream.Collectors;
  * 提示词由固定模板 + 子节点的 {@link RouteSpec} 拼成：模板只描述"怎么判断动作"，
  * "有哪些去向、各自什么时候去"全部来自子节点自己的声明。新增子节点时这个类和它的提示词都不用改。
  * <p>
- * 去向和任务栈的变化由代码决定，模型只输出 action + intent。
+ * 去向和任务栈的变化由代码决定，模型输出 action + intent，以及用户要修改的槽位名。
  * <p>
  * 根路由 A 是它的一个子类；以后如果某个分支下的子节点多了需要二级路由（例如 B1 下面有多种任务），
  * 再写一个子类、换个 id，子节点把 parent 指向它即可。
@@ -54,9 +55,14 @@ public abstract class IntentRouterNode extends AbstractNode {
                或者要修改已填的信息（哪怕只有一个词），action 填 CONTINUE，intent 填这个任务对应的模块。
             3. 只有用户明确表达放弃时才判定为 CANCEL，单纯问别的事情是 DIGRESS。
             4. 拿不准属于哪个模块时，intent 选 %s。
+            5. 用户要修改任务信息时，editSlots 填"可修改信息"中对应的字段编码（可以多个），即使没说新值也要填。
+               修改前面阶段的信息、直接提供与旧值不同的新信息（例如已收集区域后说"改到西湖区"），也属于修改。
+               只说"我想修改区域"也必须填写区域字段；仅表达泛泛的"我要改一下"但不知道哪项时填 []。
+               用户在回答待修改信息的追问时，继续当前任务。正常补充缺失信息、确认、插话、取消时 editSlots 填 []。
+               只能使用列出的字段编码，不能填写节点名或其他任务的字段。
 
             只输出 JSON，不要输出任何其他内容，格式：
-            {"action": "CONTINUE|START|DIGRESS|CANCEL", "intent": "上面列出的模块编码之一", "reason": "一句话理由"}
+            {"action": "CONTINUE|START|DIGRESS|CANCEL", "intent": "上面列出的模块编码之一", "editSlots": [], "reason": "一句话理由"}
             """;
 
     private static final String USER_TEMPLATE = """
@@ -71,7 +77,7 @@ public abstract class IntentRouterNode extends AbstractNode {
             """;
 
     /** 模型的原始输出 */
-    public record RouterOutput(Action action, String intent, String reason) {
+    public record RouterOutput(Action action, String intent, String reason, List<String> editSlots) {
     }
 
     protected final RouteCatalog catalog;
@@ -110,8 +116,8 @@ public abstract class IntentRouterNode extends AbstractNode {
         prompts.put("route · system", systemPrompt());
         prompts.put("route · user", USER_TEMPLATE.formatted(
                 "来自\"{模块名}\"（{意图编码}）：{追问原话}　　← 上一轮没有节点追问时是：（无）",
-                "{任务名（任务类型）}\n当前阶段：{阶段说明}\n已收集信息：{槽位}\n正在等用户回答：{例如确认节点在等确认}"
-                        + "　　← 第四行只在任务节点等用户回答时出现；没有进行中的任务时这几行是：（无）",
+                "{任务名（任务类型）}\n当前阶段：{阶段说明}\n已收集信息：{槽位}\n可修改信息：{字段编码及中文说明}\n待修改字段：{字段编码}\n正在等用户回答：{例如确认节点在等确认}"
+                        + "　　← 等待回答一行只在任务节点等用户回答时出现；没有进行中的任务时这几行是：（无）",
                 "\n{早期对话摘要，没有则不出现}\n",
                 "{最近 6 条对话}", "{用户本轮消息}"));
         return prompts;
@@ -181,6 +187,11 @@ public abstract class IntentRouterNode extends AbstractNode {
             String desc = "%s（%s）%n当前阶段：%s%n已收集信息：%s".formatted(
                     catalog.taskName(t.getTaskType()), t.getTaskType(),
                     stage.isBlank() ? t.getCurrentNode() : stage, t.getSlots());
+            String editable = catalog.taskSlotStages(t).stream()
+                    .flatMap(n -> n.editableSlots().stream())
+                    .map(s -> s.name() + "（" + s.label() + "）")
+                    .collect(Collectors.joining("、"));
+            desc += "\n可修改信息：" + editable + "\n待修改字段：" + t.getEditingSlots();
             // 任务节点明确在等用户回答（例如确认节点在等"确认 / 修改 / 取消"）
             return t.getAwaiting() == null || t.getAwaiting().isBlank() ? desc
                     : desc + "%n正在等用户回答：%s".formatted(t.getAwaiting());
@@ -245,7 +256,7 @@ public abstract class IntentRouterNode extends AbstractNode {
                 }
                 TaskFrame t = task.get();
                 if (catalog.exists(t.getCurrentNode())) {
-                    return new RouteDecision(Action.CONTINUE, t.getTaskType(), t.getCurrentNode(), out.reason(), usedFallback, false);
+                    return continueTask(t, out, usedFallback);
                 }
                 // 任务停留的节点已经下线（例如发版删了节点），放弃这个任务
                 log.warn("任务 {} 停留的节点 {} 不存在，任务取消", t.getTaskType(), t.getCurrentNode());
@@ -282,7 +293,7 @@ public abstract class IntentRouterNode extends AbstractNode {
             if (task.map(t -> t.getTaskType().equals(option.spec().taskType())).orElse(false)) {
                 // 就是当前任务本身，按继续处理，不重复开任务
                 TaskFrame t = task.get();
-                return new RouteDecision(Action.CONTINUE, t.getTaskType(), t.getCurrentNode(), out.reason(), usedFallback, false);
+                return continueTask(t, out, usedFallback);
             }
             // 新任务压栈；如果原来有任务，它留在栈里，新任务完成或取消后再回到它
             stack.add(TaskFrame.start(option.spec().taskType(), option.nodeId()));
@@ -296,6 +307,28 @@ public abstract class IntentRouterNode extends AbstractNode {
     private static void dropPending(List<TaskFrame> stack, Optional<TaskFrame> pending) {
         pending.ifPresent(p -> p.setStatus(TaskFrame.TaskStatus.DONE));
         stack.removeIf(f -> !f.isOpen());
+    }
+
+    private RouteDecision continueTask(TaskFrame task, RouterOutput out, boolean usedFallback) {
+        List<SlotFillingNode> stages = catalog.taskSlotStages(task);
+        if (out.editSlots() != null) {
+            // 只接收当前任务已到达阶段的持久化槽位，去向由其所属节点决定。
+            for (SlotFillingNode stage : stages) {
+                for (var spec : stage.editableSlots()) {
+                    if (out.editSlots().contains(spec.name()) && !task.getEditingSlots().contains(spec.name())) {
+                        task.getEditingSlots().add(spec.name());
+                    }
+                }
+            }
+        }
+        for (SlotFillingNode stage : stages) {
+            if (stage.editableSlots().stream().anyMatch(s -> task.getEditingSlots().contains(s.name()))) {
+                task.setCurrentNode(stage.id());
+                task.setAwaiting(null);
+                break;
+            }
+        }
+        return new RouteDecision(Action.CONTINUE, task.getTaskType(), task.getCurrentNode(), out.reason(), usedFallback, false);
     }
 
     protected String cancelReply(TaskFrame task) {

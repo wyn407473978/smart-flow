@@ -138,6 +138,9 @@ public class RepairCollectNode extends SlotFillingNode {
 任务有多个收集阶段时，中间阶段也写成 `SlotFillingNode`，**不声明 `routeSpec`**（只能由上一阶段推进过来），
 上一阶段的 `nextNode()` 指向它。
 
+路由会沿入口到当前阶段的收集链自动列出可修改字段。用户在后续阶段要求修改前面阶段的信息时，
+框架根据 `editSlots` 返回所属节点；只说要改但没给新值时，保留旧值并追问，待有效新值通过该节点的校验后再推进。
+
 ## 5. 任务最后一步：确认后提交（ConfirmNode）
 
 ```java

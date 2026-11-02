@@ -25,13 +25,16 @@ class TaskStackEditTest {
     @Test
     void editsACopyNotTheState() {
         TaskFrame original = TaskFrame.start("ACTIVITY_CREATE", "collect_target");
+        original.setEditingSlots(List.of("region"));
         FlowState state = stateWith(original);
 
         TaskStackEdit edit = TaskStackEdit.of(state);
         edit.requireActiveTask("collect_target").getSlots().put("region", "阳光社区");
+        edit.requireActiveTask("collect_target").getEditingSlots().clear();
         edit.advanceTo("choose_template");
 
         assertTrue(original.getSlots().isEmpty(), "状态里的帧不应被修改");
+        assertEquals(List.of("region"), original.getEditingSlots(), "待修改项也必须独立复制");
         assertEquals("collect_target", original.getCurrentNode());
         assertEquals("choose_template", edit.activeTask().orElseThrow().getCurrentNode());
     }

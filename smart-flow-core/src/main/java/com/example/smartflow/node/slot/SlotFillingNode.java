@@ -72,6 +72,7 @@ public abstract class SlotFillingNode extends AbstractNode {
             还缺少：%s
             %s
             请用一到两句话回复用户：如果本轮刚收集到新信息，先简短确认；然后自然地追问还缺少的信息。
+            只能确认本步骤实际保存的信息。用户要求修改但还没提供有效新值时，必须追问新内容，不能说已修改成功。
             语气亲切简洁，不要编造用户没说过的信息，不要提到"槽位""字段"这类技术词。
             """;
 
@@ -94,6 +95,15 @@ public abstract class SlotFillingNode extends AbstractNode {
      * 返回 null 表示收齐即任务完成。
      */
     protected abstract String nextNode();
+
+    /** 供路由目录沿任务阶段查找槽位归属，模型不能自行指定任意节点。 */
+    public final String nextStage() {
+        return nextNode();
+    }
+
+    public final List<SlotSpec> editableSlots() {
+        return slots().stream().filter(s -> !s.extractOnly()).toList();
+    }
 
     /** 用户正在办的事的背景，写进抽取和追问提示词，例如"用户正在创建一个民生活动。"，可以为空 */
     protected String taskContext() {
@@ -139,9 +149,13 @@ public abstract class SlotFillingNode extends AbstractNode {
      * @param extracted 模型抽取的原始结果
      */
     public MergeResult applyExtraction(Map<String, Object> slots, Map<String, Object> extracted) {
+        return Slots.merge(slots(), slots, normalizedExtraction(extracted), this::validateTogether);
+    }
+
+    private Map<String, Object> normalizedExtraction(Map<String, Object> extracted) {
         Map<String, Object> ex = extracted == null ? new LinkedHashMap<>() : new LinkedHashMap<>(extracted);
         normalize(ex);
-        return Slots.merge(slots(), slots, ex, this::validateTogether);
+        return ex;
     }
 
     // =====================================================================
@@ -180,10 +194,24 @@ public abstract class SlotFillingNode extends AbstractNode {
         TaskFrame task = edit.requireActiveTask(id());
 
         // 1. 抽取  2. 校验 + 合并
-        MergeResult result = applyExtraction(task.getSlots(), extract(state, scope, task));
+        Map<String, Object> extracted = normalizedExtraction(extract(state, scope, task));
+        MergeResult result = Slots.merge(slots(), task.getSlots(), extracted, this::validateTogether);
+        // "想改区域"不能因为旧值仍在就直接跳过；只有本轮有效抽取并通过校验才结束该项修改。
+        for (SlotSpec spec : editableSlots()) {
+            Object raw = extracted.get(spec.name());
+            if (raw != null && !result.errors().isRejected(spec.name())
+                    && (raw == Slots.CLEAR || Slots.convert(spec, raw).value() != null)) {
+                task.getEditingSlots().remove(spec.name());
+            }
+        }
 
         // 3. 推进或追问
-        List<String> missing = missing(task.getSlots());
+        List<String> missing = new ArrayList<>(missing(task.getSlots()));
+        for (SlotSpec spec : editableSlots()) {
+            if (task.getEditingSlots().contains(spec.name()) && !missing.contains(spec.name())) {
+                missing.add(spec.name());
+            }
+        }
         Map<String, Object> updates = updates();
         if (missing.isEmpty() && result.errors().isEmpty()) {
             String next = nextNode();
@@ -197,7 +225,7 @@ public abstract class SlotFillingNode extends AbstractNode {
                 goTo(updates, next);
             }
         } else {
-            updates.put(FlowState.REPLIES, ask(state, scope, task.getSlots(), missing, result));
+            updates.put(FlowState.REPLIES, ask(state, scope, task, missing, result));
         }
         return edit.writeTo(updates);
     }
@@ -220,9 +248,10 @@ public abstract class SlotFillingNode extends AbstractNode {
                 : state.history().get(state.history().size() - 1).content();
         String user = """
                 已收集信息：%s
+                用户要求修改、等待新值的字段：%s
                 助手上一句话：%s
                 【用户本轮消息】：%s
-                """.formatted(describe(task.getSlots()), lastAssistant, state.userInput());
+                """.formatted(describe(task.getSlots()), task.getEditingSlots(), lastAssistant, state.userInput());
         List<ChatMessage> messages = List.of(system(extractPrompt()), UserMessage.from(user));
         try {
             Map<String, Object> out = chatJson(scope, "extract_slots", support.models().chat(), messages, Map.class);
@@ -235,15 +264,20 @@ public abstract class SlotFillingNode extends AbstractNode {
 
     // ------------------------------------------------------------------ 追问
 
-    private String ask(FlowState state, NodeScope scope, Map<String, Object> slots,
+    private String ask(FlowState state, NodeScope scope, TaskFrame task,
                        List<String> missing, MergeResult result) throws Exception {
         List<String> errors = result.errors().messages();
         String errorLine = errors.isEmpty() ? ""
                 : "用户本轮提供的信息有问题，需要请用户重新确认：" + String.join("；", errors) + "\n";
+        List<String> editing = editableSlots().stream().filter(s -> task.getEditingSlots().contains(s.name()))
+                .map(SlotSpec::label).toList();
+        if (!editing.isEmpty()) {
+            errorLine += "用户要求修改但尚未收到有效新内容：" + String.join("、", editing) + "。原值暂时保留，请追问新内容。\n";
+        }
         String newInfoLine = result.changed() ? "（本轮有新收集到的信息）" : "（本轮没有收集到新信息）";
         String sys = ASK_PROMPT.formatted(
                 support.assistant().name(), support.assistant().persona(), contextLine(), stageGoal(),
-                describe(slots) + " " + newInfoLine,
+                describe(task.getSlots()) + " " + newInfoLine,
                 missing.isEmpty() ? "（无）" : String.join("、", Slots.missingWithHints(slots(), missing)),
                 errorLine);
 
