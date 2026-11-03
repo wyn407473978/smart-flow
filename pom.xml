@@ -34,10 +34,18 @@
         <langchain4j.version>1.19.0</langchain4j.version>
         <!-- 3.0.5 的基线是 Spring Boot 3.5.x；4.x 是给 Spring Boot 4 用的 -->
         <mybatis-spring-boot.version>3.0.5</mybatis-spring-boot.version>
+        <opentelemetry.version>1.67.0</opentelemetry.version>
     </properties>
 
     <dependencyManagement>
         <dependencies>
+            <dependency>
+                <groupId>io.opentelemetry</groupId>
+                <artifactId>opentelemetry-bom</artifactId>
+                <version>${opentelemetry.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
             <dependency>
                 <groupId>com.example</groupId>
                 <artifactId>smart-flow-core</artifactId>

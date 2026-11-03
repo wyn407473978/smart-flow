@@ -75,6 +75,8 @@ curl -s localhost:8080/api/chat -H 'Content-Type: application/json' \
 
 `userId` 可选，带上它才会启用长期记忆。
 
+可选的 [Langfuse tracing 配置与验证](docs/langfuse.md)：记录轮次、节点、每次模型请求、工具和后台记忆任务，默认关闭外发和正文采集。
+
 ## 目录结构
 
 ```

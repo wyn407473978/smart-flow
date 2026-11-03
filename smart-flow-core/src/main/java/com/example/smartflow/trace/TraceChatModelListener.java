@@ -133,6 +133,10 @@ public class TraceChatModelListener implements ChatModelListener {
                     ObjectNode t = tools.addObject();
                     t.put("name", spec.name());
                     t.put("description", spec.description());
+                    if (spec.parameters() != null) {
+                        t.set("parameters", mapper.valueToTree(
+                                dev.langchain4j.internal.JsonSchemaElementJsonUtils.toMap(spec.parameters())));
+                    }
                 }
             }
         }

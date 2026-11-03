@@ -21,6 +21,16 @@ spring:
       continue-on-error: false
 
 flow:
+  langfuse:
+    enabled: ${LANGFUSE_ENABLED:false}
+    base-url: ${LANGFUSE_BASE_URL:}
+    public-key: ${LANGFUSE_PUBLIC_KEY:}
+    secret-key: ${LANGFUSE_SECRET_KEY:}
+    # 默认只发送模型、用量、耗时和层级；开启后才发送经脱敏的正文。
+    capture-content: ${LANGFUSE_CAPTURE_CONTENT:false}
+    environment: ${LANGFUSE_TRACING_ENVIRONMENT:development}
+    release: ${LANGFUSE_RELEASE:}
+    sample-rate: ${LANGFUSE_SAMPLE_RATE:1.0}
   # 助手人设：各节点提示词里的名字和说话风格都从这里取，换业务只改这里
   assistant:
     name: 智慧民生助手

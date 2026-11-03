@@ -1,9 +1,12 @@
 package com.example.smartflow.trace;
 
 import com.example.smartflow.flow.ToolFact;
+import com.example.smartflow.trace.langfuse.LangfuseTracing;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.stereotype.Repository;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.lang.Nullable;
 
 import java.util.Collection;
 import java.util.List;
@@ -24,26 +27,46 @@ public class TraceRepository {
     private final LlmCallMapper llmCallMapper;
     private final ToolCallMapper toolCallMapper;
     private final ObjectMapper mapper;
+    private final LangfuseTracing langfuse;
 
     public TraceRepository(TurnMapper turnMapper, NodeExecMapper nodeExecMapper,
                            LlmCallMapper llmCallMapper, ToolCallMapper toolCallMapper, ObjectMapper mapper) {
+        this(turnMapper, nodeExecMapper, llmCallMapper, toolCallMapper, mapper, null);
+    }
+
+    @Autowired
+    public TraceRepository(TurnMapper turnMapper, NodeExecMapper nodeExecMapper,
+                           LlmCallMapper llmCallMapper, ToolCallMapper toolCallMapper, ObjectMapper mapper,
+                           @Nullable LangfuseTracing langfuse) {
         this.turnMapper = turnMapper;
         this.nodeExecMapper = nodeExecMapper;
         this.llmCallMapper = llmCallMapper;
         this.toolCallMapper = toolCallMapper;
         this.mapper = mapper;
+        this.langfuse = langfuse;
     }
 
     // ------------------------------------------------------------------ turn
 
     public void insertTurn(String turnId, String sessionId, int seq, String userInput, Object stateBefore) {
         turnMapper.insertTurn(turnId, sessionId, seq, userInput, json(stateBefore));
+        if (langfuse != null) langfuse.startTurn(turnId, sessionId, null, userInput);
+    }
+
+    public void insertTurn(String turnId, String sessionId, String userId, int seq, String userInput, Object stateBefore) {
+        // 保留已有子类（例如内存测试存储）覆盖原方法的行为。
+        insertTurn(turnId, sessionId, seq, userInput, stateBefore);
+        if (langfuse != null) langfuse.identifyUser(turnId, userId);
     }
 
     public void finishTurn(String turnId, String finalReply, String routeAction, String routeTarget,
                            List<String> nodePath, Object stateAfter, String status, String errorMsg, long latencyMs) {
-        turnMapper.finishTurn(turnId, finalReply, routeAction, routeTarget, json(nodePath), json(stateAfter),
-                status, errorMsg, latencyMs);
+        try {
+            turnMapper.finishTurn(turnId, finalReply, routeAction, routeTarget, json(nodePath), json(stateAfter),
+                    status, errorMsg, latencyMs);
+        } finally {
+            if (langfuse != null) langfuse.endTurn(turnId, finalReply, status, errorMsg);
+        }
     }
 
     // ------------------------------------------------------------------ node exec
@@ -51,10 +74,15 @@ public class TraceRepository {
     public void insertNodeExec(String execId, String turnId, String sessionId, int seq,
                                String nodeId, String nodeType, Object inputState) {
         nodeExecMapper.insertNodeExec(execId, turnId, sessionId, seq, nodeId, nodeType, json(inputState));
+        if (langfuse != null) langfuse.startNode(execId, turnId, nodeId, nodeType, inputState);
     }
 
     public void finishNodeExec(String execId, Object outputUpdate, String status, String errorMsg, long latencyMs) {
-        nodeExecMapper.finishNodeExec(execId, json(outputUpdate), status, errorMsg, latencyMs);
+        try {
+            nodeExecMapper.finishNodeExec(execId, json(outputUpdate), status, errorMsg, latencyMs);
+        } finally {
+            if (langfuse != null) langfuse.endNode(execId, outputUpdate, status, errorMsg);
+        }
     }
 
     // ------------------------------------------------------------------ llm call
@@ -64,13 +92,20 @@ public class TraceRepository {
                               String requestBodyJson) {
         llmCallMapper.insertLlmCall(callId, turnId, sessionId, execId, nodeId, purpose, provider, modelName,
                 streaming, requestBodyJson);
+        if (langfuse != null) langfuse.startGeneration(callId, turnId, sessionId, execId, nodeId,
+                purpose, provider, modelName, streaming, requestBodyJson);
     }
 
     public void finishLlmCall(String callId, String responseBodyJson, String responseText,
                               Integer inputTokens, Integer outputTokens, Integer totalTokens,
                               String finishReason, String status, String errorMsg, long latencyMs) {
-        llmCallMapper.finishLlmCall(callId, responseBodyJson, responseText, inputTokens, outputTokens, totalTokens,
-                finishReason, status, errorMsg, latencyMs);
+        try {
+            llmCallMapper.finishLlmCall(callId, responseBodyJson, responseText, inputTokens, outputTokens, totalTokens,
+                    finishReason, status, errorMsg, latencyMs);
+        } finally {
+            if (langfuse != null) langfuse.endGeneration(callId, responseBodyJson, responseText,
+                    inputTokens, outputTokens, totalTokens, finishReason, status, errorMsg);
+        }
     }
 
     // ------------------------------------------------------------------ tool call
@@ -78,10 +113,15 @@ public class TraceRepository {
     public void insertToolCall(String toolCallId, String turnId, String sessionId, String execId, String llmCallId,
                                String nodeId, String toolName, String argumentsJson) {
         toolCallMapper.insertToolCall(toolCallId, turnId, sessionId, execId, llmCallId, nodeId, toolName, argumentsJson);
+        if (langfuse != null) langfuse.startTool(toolCallId, turnId, execId, llmCallId, toolName, argumentsJson);
     }
 
     public void finishToolCall(String toolCallId, String result, String status, String errorMsg, long latencyMs) {
-        toolCallMapper.finishToolCall(toolCallId, result, status, errorMsg, latencyMs);
+        try {
+            toolCallMapper.finishToolCall(toolCallId, result, status, errorMsg, latencyMs);
+        } finally {
+            if (langfuse != null) langfuse.endTool(toolCallId, result, status, errorMsg);
+        }
     }
 
     /**

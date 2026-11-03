@@ -96,17 +96,17 @@ public class WorkflowEngine {
         int seq = session.turnCount() + 1;
 
         String turnId = UUID.randomUUID().toString();
-        trace.insertTurn(turnId, sessionId, seq, userInput, before);
-
-        // 2. 记忆：摘要 + 摘要之后的对话原文 + 其中的工具结果 + 长期记忆。先读再写入本轮用户消息（历史里不含本轮输入）
-        MemoryService.MemoryContext mem = memory.load(sessionId, userId);
-        sessions.insertMessage(sessionId, turnId, HistoryMessage.USER, userInput, null);
+        trace.insertTurn(turnId, sessionId, userId, seq, userInput, before);
 
         TurnContext ctx = new TurnContext(sessionId, turnId, sink);
         turns.register(ctx);
         ctx.emit(TurnEvent.of("turn", "turnId", turnId, "seq", seq));
 
         try {
+            // 2. 记忆：先读再写入本轮用户消息。放在 try 内，读取失败也能正确结束本轮 trace。
+            MemoryService.MemoryContext mem = memory.load(sessionId, userId);
+            sessions.insertMessage(sessionId, turnId, HistoryMessage.USER, userInput, null);
+
             // 3. 跑图
             Map<String, Object> input = new HashMap<>();
             input.put(FlowState.SESSION_ID, sessionId);
