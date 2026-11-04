@@ -21,12 +21,10 @@ public class ActivityLegacyConfiguration {
             @Override public String stageDescription() { return "继续短信活动创建，重新校验旧版参数"; }
             @Override protected Map<String, Object> execute(FlowState state, NodeScope scope) {
                 TaskStackEdit edit = editTasks(state);
-                // 旧版 editingSlots 使用字段名，新版按四个分组处理。
+                // 性别、年龄字段名和新版一致；旧版的活动时间、活动模版换成新版字段。
                 var editing = edit.requireActiveTask(id()).getEditingSlots();
-                if (editing.remove("gender") | editing.remove("ageMin") | editing.remove("ageMax")) {
-                    if (!editing.contains("audience")) editing.add("audience");
-                }
-                if (editing.remove("activityTime") && !editing.contains("time")) editing.add("time");
+                if (editing.remove("activityTime") && !editing.contains("sendTime")) editing.add("sendTime");
+                if (editing.remove("template") && !editing.contains("smsContent")) editing.add("smsContent");
                 edit.advanceTo(MinshengNames.ACTIVITY_CREATE);
                 return edit.writeTo(goTo(updates(), MinshengNames.ACTIVITY_CREATE));
             }

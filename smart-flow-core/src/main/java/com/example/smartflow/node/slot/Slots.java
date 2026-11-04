@@ -53,7 +53,7 @@ public final class Slots {
         SlotErrors errors = new SlotErrors();
 
         for (SlotSpec spec : specs) {
-            if (spec.extractOnly() || extracted == null || !extracted.containsKey(spec.name())) {
+            if (spec.extractOnly() || spec.managed() || extracted == null || !extracted.containsKey(spec.name())) {
                 continue;
             }
             Object raw = extracted.get(spec.name());
@@ -257,9 +257,9 @@ public final class Slots {
 
     // ------------------------------------------------------------------ 抽取提示词
 
-    /** 抽取提示词里的字段说明，一个字段一行 */
+    /** 抽取提示词里的字段说明，一个字段一行（managed 槽位由代码维护，不交给模型） */
     public static String fieldGuide(List<SlotSpec> specs) {
-        return specs.stream().map(Slots::fieldLine).collect(Collectors.joining("\n"));
+        return specs.stream().filter(s -> !s.managed()).map(Slots::fieldLine).collect(Collectors.joining("\n"));
     }
 
     private static String fieldLine(SlotSpec spec) {
@@ -290,7 +290,8 @@ public final class Slots {
 
     /** 抽取提示词里的 JSON 格式示例：所有字段都是 null */
     public static String jsonTemplate(List<SlotSpec> specs) {
-        return specs.stream().map(s -> "\"" + s.name() + "\": null").collect(Collectors.joining(", ", "{", "}"));
+        return specs.stream().filter(s -> !s.managed())
+                .map(s -> "\"" + s.name() + "\": null").collect(Collectors.joining(", ", "{", "}"));
     }
 
     /** 追问时"还缺少"的说明：枚举项带上可选值，方便模型告诉用户有哪些选择 */

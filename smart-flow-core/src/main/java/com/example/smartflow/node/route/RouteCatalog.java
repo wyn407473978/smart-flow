@@ -3,6 +3,7 @@ package com.example.smartflow.node.route;
 import com.example.smartflow.flow.TaskFrame;
 import com.example.smartflow.node.AbstractNode;
 import com.example.smartflow.node.slot.SlotFillingNode;
+import com.example.smartflow.node.slot.SlotGroupNode;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
@@ -91,7 +92,10 @@ public class RouteCatalog {
         return List.copyOf(snapshot().nodes.values());
     }
 
-    /** 当前任务入口到当前阶段的收集节点；不能跳到其他任务或尚未经过的阶段。 */
+    /**
+     * 当前任务入口到当前阶段的收集节点；不能跳到其他任务或尚未经过的阶段。
+     * 无序收集组（{@link SlotGroupNode}）的全部成员一起算作一个阶段。
+     */
     public List<SlotFillingNode> taskSlotStages(TaskFrame task) {
         Snapshot s = snapshot();
         RouteOption entry = s.taskEntries.get(task.getTaskType());
@@ -105,14 +109,27 @@ public class RouteCatalog {
             AbstractNode node = s.nodes.get(nodeId);
             if (node instanceof SlotFillingNode stage) {
                 stages.add(stage);
+            } else if (node instanceof SlotGroupNode group) {
+                stages.addAll(group.members());
             }
             if (nodeId.equals(task.getCurrentNode())
-                    || node instanceof SlotFillingNode stage && stage.previousStageIds().contains(task.getCurrentNode())) {
+                    || node instanceof SlotFillingNode stage && stage.previousStageIds().contains(task.getCurrentNode())
+                    || node instanceof SlotGroupNode group
+                    && group.members().stream().anyMatch(m -> m.id().equals(task.getCurrentNode()))) {
                 return List.copyOf(stages);
             }
-            nodeId = node instanceof SlotFillingNode stage ? stage.nextStage() : null;
+            nodeId = node instanceof SlotFillingNode stage ? stage.nextStage()
+                    : node instanceof SlotGroupNode group ? group.nextStage() : null;
         }
         return List.of();
+    }
+
+    /** 修改某个收集节点的字段时任务应该回到哪个节点：组成员回到所在的组，其他就是它自己 */
+    public String editEntry(SlotFillingNode stage) {
+        return snapshot().nodes.values().stream()
+                .filter(n -> n instanceof SlotGroupNode group && group.members().contains(stage))
+                .map(AbstractNode::id)
+                .findFirst().orElse(stage.id());
     }
 
     /** 丢弃缓存，下次使用时重新读取节点列表（测试用；以后路由描述改成从后台配置读取时也用得上） */

@@ -28,6 +28,8 @@ import java.util.regex.Pattern;
  * @param max         INTEGER / NUMBER 的最大值（含），为空不限制
  * @param maxLength   STRING 的最大长度，为空不限制
  * @param extractOnly 只让模型抽取、不保存的辅助字段（例如"年龄不限"），由节点的 normalize 换算成真正的槽位
+ * @param managed     由节点代码维护、不让模型抽取的槽位（例如用户从候选里选定的短信正文，由 afterMerge 写入）。
+ *                    不出现在抽取提示词里，合并时忽略模型输出；仍参与必填判断、描述和修改
  */
 public record SlotSpec(String name,
                        String label,
@@ -39,7 +41,8 @@ public record SlotSpec(String name,
                        Double min,
                        Double max,
                        Integer maxLength,
-                       boolean extractOnly) {
+                       boolean extractOnly,
+                       boolean managed) {
 
     private static final Pattern NAME = Pattern.compile("[a-zA-Z][a-zA-Z0-9_]*");
 
@@ -63,6 +66,15 @@ public record SlotSpec(String name,
             required = false;
             group = null;
         }
+        if (extractOnly && managed) {
+            throw new IllegalArgumentException("槽位 " + name + " 不能同时是 extractOnly 和 managed");
+        }
+    }
+
+    /** 兼容旧的构造方式（不含 managed） */
+    public SlotSpec(String name, String label, SlotType type, String description, boolean required, String group,
+                    Map<String, String> options, Double min, Double max, Integer maxLength, boolean extractOnly) {
+        this(name, label, type, description, required, group, options, min, max, maxLength, extractOnly, false);
     }
 
     // ------------------------------------------------------------------ 工厂方法
@@ -105,6 +117,7 @@ public record SlotSpec(String name,
         private Double max;
         private Integer maxLength;
         private boolean extractOnly;
+        private boolean managed;
 
         private Builder(String name, String label, SlotType type) {
             this.name = name;
@@ -158,8 +171,15 @@ public record SlotSpec(String name,
             return this;
         }
 
+        /** 由节点代码维护，不让模型抽取，见 {@link SlotSpec#managed()} */
+        public Builder managed() {
+            this.managed = true;
+            return this;
+        }
+
         public SlotSpec build() {
-            return new SlotSpec(name, label, type, description, required, group, options, min, max, maxLength, extractOnly);
+            return new SlotSpec(name, label, type, description, required, group, options, min, max, maxLength,
+                    extractOnly, managed);
         }
     }
 }

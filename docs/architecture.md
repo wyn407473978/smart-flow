@@ -1,6 +1,6 @@
 # smart-flow 架构与对话流转
 
-> 当前可运行 Demo 已改为“短信活动路由 + 四个无序收集节点 + 最终确认提交”，开发请先看 [短信活动说明](sms-activity.md)。本文的旧版顺序活动示例用于讲解框架机制，其 `CollectTargetNode`、`ChooseTemplateNode`、`SubmitActivityNode` 实现已移到 `src/test/java`，不参与运行时注册。
+> 当前可运行 Demo 是“短信活动收集组（`SlotGroupNode`）+ 四个无序的 `SlotFillingNode` 成员 + 最终确认提交”，开发请先看 [短信活动说明](sms-activity.md)。本文的旧版顺序活动示例用于讲解框架机制，其 `CollectTargetNode`、`ChooseTemplateNode`、`SubmitActivityNode` 实现已移到 `src/test/java`，不参与运行时注册。
 
 本文面向第一次阅读项目的开发者，说明当前实现的职责划分、状态保存方式和执行路径。示例采用 `smart-flow-demo` 的智慧民生工作流，并包含 `AbstractNode` 拆分后的组件设计。
 
@@ -318,6 +318,10 @@ flowchart TD
 
 `task.awaiting` 始终记代码文案：下一轮路由靠它判断用户在回答什么，节点也用它发现同一个问题被连续问了两次，提示模型换个说法。
 因为追问内容由代码选定，不会自行增加人数、名称，也不会在“下周六上午”已保存后强制追问起止时刻。
+
+几项信息没有先后顺序时，用 `SlotGroupNode` 把多个 `SlotFillingNode` 组成无序组：组节点用全部成员的槽位抽取一次，
+本轮提到的成员各自 `collect`（校验合并 + `afterMerge`），然后统一追问或推进；追问规则（`SlotAsk`）和单个收集节点共用。
+`RouteCatalog.taskSlotStages` 把组成员算作同一阶段，修改成员字段时 `editEntry` 让任务回到组节点。
 
 框架仍支持多个收集阶段。自动推进的节点不发送中间确认，把本轮有变化的信息暂存在 `FlowState.collectedStageInfo`（不写入会话）。
 后续追问的事实部分由代码合并这些已保存信息；一路进入 `ConfirmNode` 时只展示完整清单。`completedText()` 只在没有下一阶段、收齐即完成任务时调用。

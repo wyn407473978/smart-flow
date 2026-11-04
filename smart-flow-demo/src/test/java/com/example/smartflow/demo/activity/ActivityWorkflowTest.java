@@ -45,6 +45,7 @@ class ActivityWorkflowTest {
     private final MutableClock clock = new MutableClock();
     private final RecordingClient client = new RecordingClient();
     private final NodeSupport support;
+    private final ActivityCreateNode activity;
     private final CompiledGraph<FlowState> graph;
     private List<TaskFrame> tasks = new ArrayList<>();
     private List<String> path = List.of();
@@ -61,7 +62,7 @@ class ActivityWorkflowTest {
                 String system = request.messages().stream().filter(SystemMessage.class::isInstance)
                         .map(SystemMessage.class::cast).map(SystemMessage::text).findFirst().orElse("");
                 String output;
-                if (system.contains("短信活动创建路由")) {
+                if (system.contains("信息抽取模块")) {
                     inputPrompts.add(request.messages().toString());
                     output = inputs.remove();
                 } else if (system.contains("社区短信文案助手")) output = templates.remove();
@@ -97,14 +98,17 @@ class ActivityWorkflowTest {
                 new FlowProperties.Memory(12), new FlowProperties.Sse(180), null,
                 new FlowProperties.SlotFilling(askMode, null, null));
         support = new NodeSupport(new ModelRegistry(model, model, streaming), trace, turns, JSON, props);
-        List<ActivityCollectionNode> children = List.of(new ActivityRegionNode(support), new ActivityAudienceNode(support),
-                new ActivityTimeNode(support, clock), new ActivityTemplateNode(support));
+        var region = new ActivityRegionNode(support);
+        var audience = new ActivityAudienceNode(support);
+        var time = new ActivityTimeNode(support, clock);
+        var template = new ActivityTemplateNode(support);
+        activity = new ActivityCreateNode(support, region, audience, time, template);
         nodes.add(new RouterNode(support, catalog));
         nodes.add(new ChatNode(support, catalog));
         nodes.add(new BizQueryNode(support, catalog, new WeatherTool(JSON), new UserInfoTool(JSON)));
-        nodes.add(new ActivityCreateRouterNode(support, catalog, children, clock));
-        nodes.addAll(children);
-        nodes.add(new ActivitySubmitNode(support, client, clock));
+        nodes.add(activity);
+        nodes.addAll(List.of(region, audience, time, template));
+        nodes.add(new ActivitySubmitNode(support, client, activity));
         var legacy = new ActivityLegacyConfiguration();
         nodes.addAll(List.of(legacy.legacyActivityCollect(support), legacy.legacyActivityTemplate(support), legacy.legacyActivitySubmit(support)));
         graph = GraphConfig.build(nodes, catalog);
@@ -141,7 +145,7 @@ class ActivityWorkflowTest {
     private void untilConfirmation() throws Exception {
         templates.add(THREE);
         turn("明天九点发给蒋村街道20岁以上男性，通知健康讲座", """
-                {"region":"杭州市西湖区蒋村街道","gender":"MALE","ageMin":20,
+                {"region":"杭州市西湖区蒋村街道","gender":"MALE","ageMin":20,"ageOpenEnded":true,
                  "sendTime":"2026-11-05 09:00:00","templateBrief":"健康讲座"}
                 """);
         String reply = turn("选第二个", "{\"templateChoice\":2}");
@@ -152,7 +156,8 @@ class ActivityWorkflowTest {
 
     @Test void collectsAllFieldsInOneMessageButRequiresTemplateChoiceAndFinalConfirmation() throws Exception {
         untilConfirmation();
-        assertTrue(inputPrompts.getFirst().contains("2026-11-04 10:00:00"));
+        assertTrue(inputPrompts.getFirst().contains("2026-11-04 10:00:00"), "抽取提示词带上当前北京时间");
+        assertEquals(1, inputPrompts.size() - 1, "一句话提供多项也只抽取一次（第二轮是选模版）");
         String reply = turn("确认", null);
         assertTrue(reply.contains("短信活动创建完毕"), reply);
         assertTrue(tasks.isEmpty());
@@ -166,7 +171,7 @@ class ActivityWorkflowTest {
     }
 
     @Test void acceptsAllTwentyFourCollectionOrders() throws Exception {
-        for (List<String> order : permutations(new ArrayList<>(ActivityData.SECTIONS))) {
+        for (List<String> order : permutations(new ArrayList<>(List.of("region", "audience", "time", "template")))) {
             ActivityWorkflowTest scenario = new ActivityWorkflowTest();
             for (String section : order) {
                 String input = switch (section) {
@@ -197,6 +202,7 @@ class ActivityWorkflowTest {
             String reply = turn("发送时间", JSON.writeValueAsString(Map.of("sendTime", entry.getKey())));
             assertTrue(reply.contains(entry.getValue()), reply);
             assertFalse(reply.contains("yyyy"), "不把格式串露给用户：" + reply);
+            assertTrue(reply.contains("请重新提供：具体的发送日期和时刻"), reply);
             assertFalse(tasks.getFirst().getSlots().containsKey("sendTime"));
             assertEquals(0, client.calls);
         }
@@ -207,7 +213,7 @@ class ActivityWorkflowTest {
         clock.instant = Instant.parse("2026-11-05T01:00:01Z");
         String expired = turn("确认", "{}");
         assertTrue(expired.contains("原定的发送时间 2026-11-05 09:00 已经过去了"), expired);
-        assertTrue(expired.contains("未来的短信发送日期"), expired);
+        assertTrue(expired.contains("请重新提供：具体的发送日期和时刻"), expired);
         assertEquals(0, client.calls);
         String corrected = turn("改为后天九点", "{\"sendTime\":\"2026-11-07 09:00:00\"}");
         assertTrue(corrected.contains("请确认是否"), corrected);
@@ -219,24 +225,30 @@ class ActivityWorkflowTest {
     @Test void partialTimeAnswersIncludePreviousUserDateInTheNextExtraction() throws Exception {
         turn("明天发送", "{\"sendTime\":\"\"}");
         turn("上午9点", "{\"sendTime\":\"2026-11-05 09:00:00\"}");
-        assertTrue(inputPrompts.getLast().contains("明天发送"));
+        assertTrue(inputPrompts.getLast().contains("明天发送"), "抽取时带上最近对话");
         assertEquals("2026-11-05 09:00:00", tasks.getFirst().getSlots().get("sendTime"));
     }
 
     @Test void editsAtConfirmationKeepOtherParametersAndDoNotSubmit() throws Exception {
         untilConfirmation();
         confirms.add("{\"decision\":\"MODIFY\"}");
-        String edited = turn("区域改为拱墅区", "{\"region\":\"杭州市拱墅区\",\"editSections\":[\"region\"]}");
+        String edited = turn("区域改为拱墅区", "{\"region\":\"杭州市拱墅区\"}");
         assertTrue(edited.contains("杭州市拱墅区"), edited);
         assertTrue(edited.contains("请确认是否"), edited);
         assertEquals("邀您参与社区健康讲座。", tasks.getFirst().getSlots().get("smsContent"));
         assertEquals(0, client.calls);
-        confirms.add("{\"decision\":\"MODIFY\"}");
-        String ask = turn("我要修改区域", "{\"editSections\":[\"region\"]}");
-        assertTrue(ask.contains("短信要发到哪个区域"), ask);
-        assertEquals("杭州市拱墅区", tasks.getFirst().getSlots().get("region"));
+
+        // 只说要改、没给新值：路由标出待修改字段，任务回到收集组（而不是单独的区域节点）追问
+        roots.add("{\"action\":\"CONTINUE\",\"intent\":\"ACTIVITY_CREATE\",\"editSlots\":[\"region\"]}");
+        inputs.add("{}");
+        String ask = run("我要修改区域");
+        assertEquals(List.of("router", MinshengNames.ACTIVITY_CREATE), path);
+        assertTrue(ask.contains("请重新提供：发送区域"), ask);
+        assertEquals("杭州市拱墅区", tasks.getFirst().getSlots().get("region"), "新值通过校验前保留旧值");
         turn("还没想好", "{}");
-        assertFalse(ActivityData.ready(tasks.getFirst(), clock));
+        assertFalse(activity.complete(tasks.getFirst()));
+        String done = turn("改成余杭区", "{\"region\":\"杭州市余杭区\"}");
+        assertTrue(done.contains("请确认是否") && done.contains("杭州市余杭区"), done);
     }
 
     @Test void templateReplacementInvalidatesOldChoiceAndRejectsInvalidChoice() throws Exception {
@@ -244,13 +256,23 @@ class ActivityWorkflowTest {
         confirms.add("{\"decision\":\"MODIFY\"}");
         templates.add("{\"templates\":[\"停水通知一\",\"停水通知二\",\"停水通知三\"]}");
         String reply = turn("改成停水通知，选第一个", "{\"templateBrief\":\"停水通知\",\"templateChoice\":1}");
-        assertTrue(reply.contains("停水通知三"), reply);
-        assertFalse(tasks.getFirst().getSlots().containsKey("smsContent"));
+        assertTrue(reply.contains("推荐了三个短信模版：\n1. 停水通知一"), reply);
+        assertFalse(tasks.getFirst().getSlots().containsKey("smsContent"), "新候选必须先展示，再让用户选");
         String invalid = turn("选第四个", "{\"templateChoice\":4}");
         assertTrue(invalid.contains("选择1、2或3"), invalid);
+        assertTrue(invalid.contains("可选的短信模版：\n1. 停水通知一"), invalid);
         assertEquals(0, client.calls);
         turn("选第三个", "{\"templateChoice\":3}");
         assertEquals("停水通知三", tasks.getFirst().getSlots().get("smsContent"));
+    }
+
+    @Test void modelCannotFillTheSmsContentDirectly() throws Exception {
+        templates.add(THREE);
+        turn("健康讲座短信", "{\"templateBrief\":\"健康讲座\"}");
+        String reply = turn("就发欢迎参加那种", "{\"smsContent\":\"模型自己编的短信\"}");
+        assertFalse(tasks.getFirst().getSlots().containsKey("smsContent"), "选定的正文只能由代码从候选里写入");
+        assertTrue(reply.contains("可选的短信模版："), reply);
+        assertFalse(inputPrompts.getLast().contains("smsContent"), "managed 槽位不出现在抽取提示词里");
     }
 
     @Test void mockFailuresCanRetryWithSameIdempotencyKey() throws Exception {
@@ -287,12 +309,12 @@ class ActivityWorkflowTest {
             assertTrue(view.contains(child));
     }
 
-    @Test void malformedRouterAndRecommendationResultsKeepTaskOpen() throws Exception {
+    @Test void malformedExtractionAndRecommendationResultsKeepTaskOpen() throws Exception {
         inputs.add("invalid");
         String reply = turn("创建短信活动", "invalid again");
         assertTrue(reply.contains("没能识别"), reply);
-        assertTrue(reply.contains("短信要发到哪个区域"), "识别失败不挂在某一项上，按正常顺序追问：" + reply);
-        assertFalse(tasks.getFirst().getEditingSlots().contains("region"));
+        assertTrue(reply.contains("请补充：发送区域"), "识别失败不挂在某一项上，按正常顺序追问：" + reply);
+        assertTrue(tasks.getFirst().getEditingSlots().isEmpty());
         templates.add("{\"templates\":[\"重复\",\"重复\",\"重复\"]}");
         String failure = turn("健康讲座短信", "{\"templateBrief\":\"健康讲座\"}");
         assertTrue(failure.contains("三个有效模版"), failure);
@@ -300,27 +322,26 @@ class ActivityWorkflowTest {
         assertEquals(0, client.calls);
     }
 
-    @Test void audienceValidationIsAtomicAndAllAudienceClearsOldFilters() {
+    @Test void audienceValidationIsAtomicAndSingleBoundEditsKeepTheOtherBound() {
         var node = new ActivityAudienceNode(support);
-        TaskFrame task = TaskFrame.start("ACTIVITY_CREATE", "ACTIVITY_CREATE");
-        assertNull(node.collect(task, new ActivityInput(null, null, "MALE", 20, 50, null, null, null, null, null), null));
-        assertNotNull(node.collect(task, new ActivityInput(null, null, "FEMALE", 80, 30, null, null, null, null, null), null));
-        assertEquals("MALE", task.getSlots().get("gender"));
-        assertEquals(20, task.getSlots().get("ageMin"));
+        Map<String, Object> slots = new LinkedHashMap<>();
+        assertTrue(node.applyExtraction(slots, Map.of("gender", "MALE", "ageMin", 20, "ageMax", 50)).errors().isEmpty());
+        assertFalse(node.applyExtraction(slots, Map.of("gender", "FEMALE", "ageMin", 80, "ageMax", 30)).errors().isEmpty());
+        assertEquals("MALE", slots.get("gender"), "人群条件整体不生效");
+        assertEquals(20, slots.get("ageMin"));
         // "60岁以上"：单边范围，清掉旧上限
-        assertNull(node.collect(task, new ActivityInput(null, null, null, 60, null, null, null, null, null, true), null));
-        assertFalse(task.getSlots().containsKey("ageMax"));
-        assertEquals(60, task.getSlots().get("ageMin"));
+        assertTrue(node.applyExtraction(slots, Map.of("ageMin", 60, "ageOpenEnded", true)).errors().isEmpty());
+        assertFalse(slots.containsKey("ageMax"));
         // "上限改成70"：只调整一端，保留下限
-        assertNull(node.collect(task, new ActivityInput(null, null, null, null, 70, null, null, null, null, false), null));
-        assertEquals("男性，60～70岁", ActivityData.audience(task.getSlots()));
+        assertTrue(node.applyExtraction(slots, Map.of("ageMax", 70, "ageOpenEnded", false)).errors().isEmpty());
+        assertEquals("男性，60～70岁", ActivityData.audience(slots));
         // "下限改成80"：和保留的上限冲突，整体不生效
-        String conflict = node.collect(task, new ActivityInput(null, null, null, 80, null, null, null, null, null, false), null);
-        assertTrue(conflict.contains("不能大于上限"), conflict);
-        assertEquals("男性，60～70岁", ActivityData.audience(task.getSlots()));
-        node.collect(task, new ActivityInput(null, true, null, null, null, null, null, null, null, null), null);
-        assertEquals("全部人群", ActivityData.audience(task.getSlots()));
-        assertFalse(task.getSlots().containsKey("ageMin"));
+        var conflict = node.applyExtraction(slots, Map.of("ageMin", 80, "ageOpenEnded", false)).errors().messages();
+        assertTrue(conflict.getFirst().contains("不能大于上限"), conflict.toString());
+        assertEquals("男性，60～70岁", ActivityData.audience(slots));
+        node.applyExtraction(slots, Map.of("allAudience", true));
+        assertEquals("全部人群", ActivityData.audience(slots));
+        assertFalse(slots.containsKey("ageMin"));
     }
 
     @Test void oldSessionsKeepTheirParametersButMustMeetNewSmsRequirements() throws Exception {
@@ -333,9 +354,9 @@ class ActivityWorkflowTest {
             turn("继续", "{}");
             assertEquals(task.getTaskId(), tasks.getFirst().getTaskId());
             assertEquals("阳光社区", tasks.getFirst().getSlots().get("region"));
-            assertTrue(tasks.getFirst().getEditingSlots().contains("audience"));
+            assertTrue(tasks.getFirst().getEditingSlots().contains("ageMin"));
             assertEquals(MinshengNames.ACTIVITY_CREATE, tasks.getFirst().getCurrentNode());
-            assertFalse(ActivityData.ready(tasks.getFirst(), clock));
+            assertFalse(activity.complete(tasks.getFirst()));
         }
         assertEquals(0, client.calls);
     }
@@ -353,24 +374,26 @@ class ActivityWorkflowTest {
             var routes = context.getBean(RouteCatalog.class);
             GraphConfig.build(registered, routes);
             assertEquals(3, routes.options("router").size());
-            assertEquals(5, routes.options(MinshengNames.ACTIVITY_CREATE).size());
             assertEquals(1, routes.options("router").stream().filter(o -> o.spec().isTaskEntry()).count());
+            assertEquals(4, context.getBean(ActivityCreateNode.class).members().size());
             assertFalse(registered.stream().anyMatch(n -> n.getClass().getSimpleName().equals("CollectTargetNode")));
         }
     }
+
+    // ---------------------------------------------------------------- 追问
 
     @Test void freshTemplatesAreShownInTheSameTurnAndOnlyChangedFactsAreRepeated() throws Exception {
         templates.add(THREE);
         String first = turn("创建短信活动，明天上午9点发，健康讲座通知",
                 "{\"sendTime\":\"2026-11-05 09:00:00\",\"templateBrief\":\"健康讲座通知\"}");
-        assertTrue(first.startsWith("已记录：发送时间：2026-11-05 09:00（北京时间）。"), first);
-        assertTrue(first.contains("根据“健康讲座通知”推荐了三个短信模版：\n1. 社区健康讲座欢迎参加。"), first);
-        assertTrue(first.contains("请回复1、2或3选择一个短信模版") && first.contains("短信要发到哪个区域"), "模版刚推荐就请用户选，同时问一项缺失信息：" + first);
+        assertTrue(first.startsWith("当前已记录：发送时间：2026-11-05 09:00（北京时间）；短信场景：健康讲座通知。"), first);
+        assertTrue(first.contains("推荐了三个短信模版：\n1. 社区健康讲座欢迎参加。"), first);
+        assertTrue(first.endsWith("请补充：短信模版（回复1、2或3选择上面的一条，或者换个短信场景）、发送区域（例如：杭州市西湖区蒋村街道）。"),
+                "模版刚推荐就请用户选，同时问一项缺失信息：" + first);
         assertFalse(first.contains("（未填写）"), "不再每轮打印整张参数表：" + first);
-        assertEquals("template", tasks.getFirst().getSlots().get("waitingSection"));
 
         String second = turn("给蒋村街道全部人群", "{\"region\":\"杭州市西湖区蒋村街道\",\"allAudience\":true}");
-        assertTrue(second.startsWith("已记录：发送区域：杭州市西湖区蒋村街道；发送人群：全部人群。"), second);
+        assertTrue(second.startsWith("当前已记录：发送区域：杭州市西湖区蒋村街道；发送人群：全部人群。"), second);
         assertFalse(second.contains("发送时间"), "只说本轮的变化：" + second);
         assertTrue(second.contains("可选的短信模版：\n1. "), "还在等选模版时把候选再列出来：" + second);
     }
@@ -383,12 +406,12 @@ class ActivityWorkflowTest {
                 "{\"sendTime\":\"2026-11-05 09:00:00\",\"templateBrief\":\"健康讲座通知\"}");
         assertTrue(reply.endsWith("3. 社区健康讲座活动通知。\n你看哪一条合适？回复编号就行。另外短信要发到哪个区域呢？"), reply);
         String prompt = scenario.askPrompts.getLast();
-        assertTrue(prompt.contains("本轮要问：从系统列出的三个短信模版里选一条（回复1、2或3），或者换个短信场景、发送区域（例如：杭州市西湖区蒋村街道）"), prompt);
-        assertTrue(prompt.contains("之后还要了解：短信发送人群"), prompt);
-        assertTrue(prompt.contains("不要复述、改写或评价模版内容"), prompt);
+        assertTrue(prompt.contains("本轮要问：短信模版（回复1、2或3选择上面的一条，或者换个短信场景）、发送区域（例如：杭州市西湖区蒋村街道）"), prompt);
+        assertTrue(prompt.contains("之后还要了解：发送人群"), prompt);
+        assertTrue(prompt.contains("不要复述、改写或评价"), prompt);
         assertFalse(prompt.contains("2026-11-05"), "追问模型拿不到已收集的值");
         assertFalse(prompt.contains("社区健康讲座欢迎参加"), "模版原文由代码列出，不交给追问模型");
-        assertEquals("请回复1、2或3选择一个短信模版，也可以换个使用场景。短信要发到哪个区域？例如：杭州市西湖区蒋村街道。",
+        assertEquals("请补充：短信模版（回复1、2或3选择上面的一条，或者换个短信场景）、发送区域（例如：杭州市西湖区蒋村街道）。",
                 scenario.tasks.getFirst().getAwaiting(), "路由看到的仍是代码追问");
 
         scenario.asks.add("没关系，不急。先说说短信要发到哪个区域？模版也可以晚点再选。");
@@ -401,7 +424,7 @@ class ActivityWorkflowTest {
         ActivityWorkflowTest scenario = new ActivityWorkflowTest(AskMode.MODEL);
         scenario.asks.add("ERROR");
         String reply = scenario.turn("创建短信活动", "{}");
-        assertEquals("短信要发到哪个区域？例如：杭州市西湖区蒋村街道。短信面向哪些人？可以是全部人群、男性、20岁以上，或组合条件。", reply);
+        assertEquals("请补充：发送区域（例如：杭州市西湖区蒋村街道）、发送人群（全部人群，或按性别、年龄限定，例如20岁以上男性）。", reply);
         assertEquals(MinshengNames.ACTIVITY_CREATE, scenario.tasks.getFirst().getCurrentNode());
     }
 

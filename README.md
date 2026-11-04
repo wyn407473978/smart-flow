@@ -5,7 +5,7 @@ Spring Boot 3.5 + LangChain4j 1.19 + LangGraph4j 1.8（LTS）+ MyBatis 3 + Postg
 框架和业务分开放在不同模块里：新工作流依赖 `smart-flow-core`（需要 HTTP 接口和测试页再加 `smart-flow-web`），
 只写自己的节点和工具，引擎、路由、记忆、trace 都不用改。`smart-flow-demo` 是一个完整的示例工作流（智慧民生）。
 
-**修改当前短信活动 Demo：见 [短信活动开发入口](docs/sms-activity.md)**（独立活动路由 + 四个无序收集节点 + 最终确认提交）。
+**修改当前短信活动 Demo：见 [短信活动开发入口](docs/sms-activity.md)**（`SlotGroupNode` 收集组 + 四个无序的 `SlotFillingNode` + 最终确认提交）。
 
 **从零搭一个新工作流：见 [docs/new-workflow.md](docs/new-workflow.md)**（以物业报修为例，3 个节点）。
 
@@ -31,11 +31,11 @@ core 和 web 都是 Spring Boot 自动配置（`FlowCoreAutoConfiguration`、`Fl
 | A 路由 | `router` | ROUTER | 每轮必经。提示词由子节点的路由声明自动拼成；模型判断 action + intent + 待修改字段，去向和任务栈变化由代码决定 |
 | B2 业务查询 | `biz_query` | TOOL_AGENT | 挂载 `get_weather`（查天气，演示数据）、`get_user_info`（查本人信息：rise / 27 岁）；手写 tool loop，流式输出 |
 | B3 闲聊 | `chat` | CHAT | 流式回复；根路由的兜底节点 |
-| 短信活动路由 | `ACTIVITY_CREATE` | ROUTER | 根据用户输入分发区域、人群、时间、短信模版；没收齐时由代码决定问哪几项、模型措辞追问；四项收齐才确认提交 |
-| 区域收集 | `activity_region` | SLOT_FILLING | 保留用户提供的短信发送区域 |
-| 人群确认 | `activity_audience` | SLOT_FILLING | 全部人群、性别、年龄或组合条件 |
-| 时间收集 | `activity_time` | SLOT_FILLING | 相对时间转换为北京时间 `yyyy-MM-dd HH:mm:ss`，严格校验晚于当前时间 |
-| 短信模版 | `activity_template` | SLOT_FILLING | 根据短信原文或场景推荐三个候选，用户明确选定一个 |
+| 短信活动收集组 | `ACTIVITY_CREATE` | SLOT_FILLING（`SlotGroupNode`） | 任务入口。用四个成员的槽位一次抽取，各成员校验合并；没收齐时由代码决定问哪几项、模型措辞追问；四项收齐才确认提交 |
+| 区域收集 | `activity_region` | SLOT_FILLING（组成员） | 保留用户提供的短信发送区域 |
+| 人群确认 | `activity_audience` | SLOT_FILLING（组成员） | 全部人群、性别、年龄或组合条件 |
+| 时间收集 | `activity_time` | SLOT_FILLING（组成员） | 相对时间转换为北京时间 `yyyy-MM-dd HH:mm:ss`，严格校验晚于当前时间，过期后要求重新提供 |
+| 短信模版 | `activity_template` | SLOT_FILLING（组成员） | 根据短信原文或场景推荐三个候选，用户明确选定一个（正文是 managed 槽位，模型不能直接填） |
 | 确认提交 | `activity_submit` | CONFIRM | 展示真实参数，确认后调用幂等 mock 接口，成功结束任务 |
 
 四个收集节点没有业务先后顺序，支持一句提供多项、任意顺序补充和修改。只说“男性”或“20岁以上”就能确定人群条件，未限制维度默认不限。
@@ -111,7 +111,7 @@ smart-flow-web/   web/ 下是 SSE 接口、调试查询接口；resources/static
 smart-flow-demo/src/main/java/com/example/smartflow/demo/
   SmartFlowApplication、MinshengNames（节点 ID、任务类型）
   node/      闲聊、业务查询
-  activity/  短信活动路由、四个参数收集节点、最终提交及 mock 接口
+  activity/  短信活动收集组、四个参数收集节点、最终提交及 mock 接口
   tool/  演示工具（天气、个人信息）
 ```
 
@@ -159,6 +159,7 @@ public class ComplaintNode extends AbstractNode {
 | 基类 | 用途 | 子类要写的 |
 |---|---|---|
 | `SlotFillingNode` | 多轮收集信息：抽取 → 代码校验合并 → 收齐推进 / 没收齐追问 | `slots()`（`SlotSpec` 声明）、`stageGoal()`、`nextNode()` |
+| `SlotGroupNode` | 多个没有先后顺序的 `SlotFillingNode` 组成一组：一次抽取 → 各成员校验合并 → 统一追问 / 收齐推进 | 构造时传入成员、`stageGoal()`、`nextNode()` |
 | `ConfirmNode` | 任务最后一步：展示汇总 → 确认后执行写操作 / 修改回到前面的阶段 / 取消 | `summary()`、`commit()`（带幂等键）、`editNode()` |
 
 自己写任务节点时用 `editTasks(state)` 拿到任务栈副本：`advanceTo(下一阶段)` 推进、`complete()` 完成、`cancel()` 取消，
@@ -167,7 +168,7 @@ public class ComplaintNode extends AbstractNode {
 `SlotFillingNode` 默认用 `stageGoal()`，`ConfirmNode` 默认是"等用户确认"。
 
 任务进入后续阶段后仍可修改前面阶段的信息：路由根据 `editSlots` 回到字段所属的收集节点。
-通用顺序任务根据字段返回所属收集节点。当前短信活动采用自定义分组路由：确认时说“我想修改区域”，会回到活动路由再分发区域节点；旧区域暂时保留，新值通过校验后才替换，收齐后重新确认。
+通用顺序任务根据字段返回所属收集节点；无序收集组的成员字段回到所在的组。短信活动确认时说“我想修改区域”，会回到收集组追问新区域；旧区域暂时保留，新值通过校验后才替换，收齐后重新确认。
 待修改字段保存在任务帧的 `editingSlots` 中，跨轮、插话后仍会保留；不会因为旧值已经填过而跳过修改。
 
 自动完成的事情：

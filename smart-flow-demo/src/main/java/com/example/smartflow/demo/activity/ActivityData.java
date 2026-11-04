@@ -1,6 +1,5 @@
 package com.example.smartflow.demo.activity;
 
-import com.example.smartflow.flow.TaskFrame;
 import java.time.Clock;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
@@ -9,13 +8,14 @@ import java.time.format.ResolverStyle;
 import java.util.List;
 import java.util.Map;
 
-/** 活动参数的代码校验；模型只做语言理解，不能决定是否允许提交。 */
+/** 短信活动参数的公共工具：时间解析、人群描述、确认汇总。是否收齐由各收集节点的声明和规则决定。 */
 public final class ActivityData {
     private ActivityData() { }
-    public static final List<String> SECTIONS = List.of("region", "audience", "time", "template");
+
     public static final ZoneId ZONE = ZoneId.of("Asia/Shanghai");
     public static final DateTimeFormatter TIME_FORMAT = DateTimeFormatter.ofPattern("uuuu-MM-dd HH:mm:ss")
             .withResolverStyle(ResolverStyle.STRICT);
+    public static final DateTimeFormatter DISPLAY_FORMAT = DateTimeFormatter.ofPattern("uuuu-MM-dd HH:mm");
 
     /** 严格解析 yyyy-MM-dd HH:mm:ss；格式不对或日期不存在返回 null */
     public static LocalDateTime parse(Object value) {
@@ -33,39 +33,13 @@ public final class ActivityData {
         return time == null ? String.valueOf(value) : time.format(DISPLAY_FORMAT);
     }
 
-    public static final DateTimeFormatter DISPLAY_FORMAT = DateTimeFormatter.ofPattern("uuuu-MM-dd HH:mm");
-
-    /** 把多条提示连成一句：去掉各自的句末标点，用分号连接，末尾加句号 */
-    public static String sentence(java.util.Collection<String> parts) {
-        return parts.stream().map(p -> p.strip().replaceAll("[。．.！!？?；;，,]+$", ""))
-                .filter(p -> !p.isEmpty()).collect(java.util.stream.Collectors.joining("；")) + "。";
+    public static LocalDateTime now(Clock clock) {
+        return LocalDateTime.now(clock.withZone(ZONE));
     }
 
     public static boolean future(Object value, Clock clock) {
-        if (!(value instanceof String text)) return false;
-        try {
-            return text.matches("\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}")
-                    && LocalDateTime.parse(text, TIME_FORMAT).isAfter(LocalDateTime.now(clock.withZone(ZONE)));
-        } catch (java.time.DateTimeException e) {
-            return false;
-        }
-    }
-
-    public static boolean filled(String section, TaskFrame task, Clock clock) {
-        Map<String, Object> s = task.getSlots();
-        if (task.getEditingSlots().contains(section)) return false;
-        return switch (section) {
-            case "region" -> s.get("region") instanceof String r && !r.isBlank() && r.length() <= 100;
-            case "audience" -> Boolean.TRUE.equals(s.get("audienceConfirmed"));
-            case "time" -> future(s.get("sendTime"), clock);
-            case "template" -> s.get("smsContent") instanceof String t && !t.isBlank()
-                    && candidates(s).contains(t);
-            default -> false;
-        };
-    }
-
-    public static boolean ready(TaskFrame task, Clock clock) {
-        return SECTIONS.stream().allMatch(s -> filled(s, task, clock));
+        LocalDateTime time = parse(value);
+        return time != null && time.isAfter(now(clock));
     }
 
     public static List<String> candidates(Map<String, Object> slots) {
@@ -74,24 +48,26 @@ public final class ActivityData {
                 : List.of();
     }
 
+    /** 人群描述：没指定性别按不限处理；性别不限且没有年龄条件就是全部人群 */
     public static String audience(Map<String, Object> slots) {
-        if (!Boolean.TRUE.equals(slots.get("audienceConfirmed"))) return "（未确定）";
-        String gender = switch (String.valueOf(slots.get("gender"))) {
+        Object gender = slots.get("gender"), min = slots.get("ageMin"), max = slots.get("ageMax");
+        if (gender == null && min == null && max == null) return "（未确定）";
+        if ((gender == null || "ALL".equals(gender)) && min == null && max == null) return "全部人群";
+        String genderText = switch (String.valueOf(gender)) {
             case "MALE" -> "男性";
             case "FEMALE" -> "女性";
             default -> "全部性别";
         };
-        Object min = slots.get("ageMin"), max = slots.get("ageMax");
         String age = min != null && max != null ? min + "～" + max + "岁"
                 : min != null ? min + "岁及以上" : max != null ? max + "岁及以下" : "全部年龄";
-        return "ALL".equals(slots.get("gender")) && min == null && max == null ? "全部人群" : gender + "，" + age;
+        return genderText + "，" + age;
     }
 
-    public static String summary(TaskFrame task) {
-        Map<String, Object> s = task.getSlots();
+    /** 确认时展示的完整参数 */
+    public static String summary(Map<String, Object> s) {
         return "- 发送区域：" + s.getOrDefault("region", "（未填写）")
                 + "\n- 发送人群：" + audience(s)
-                + "\n- 发送时间（北京时间）：" + s.getOrDefault("sendTime", "（未填写）")
+                + "\n- 发送时间（北京时间）：" + (s.get("sendTime") == null ? "（未填写）" : display(s.get("sendTime")))
                 + "\n- 短信内容：" + s.getOrDefault("smsContent", "（未选定）");
     }
 }

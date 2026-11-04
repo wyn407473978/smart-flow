@@ -323,7 +323,7 @@ public abstract class IntentRouterNode extends AbstractNode {
         }
         for (SlotFillingNode stage : stages) {
             if (stage.editableSlots().stream().anyMatch(s -> task.getEditingSlots().contains(s.name()))) {
-                task.setCurrentNode(stage.id());
+                task.setCurrentNode(catalog.editEntry(stage));
                 task.setAwaiting(null);
                 break;
             }

@@ -132,9 +132,12 @@ public class RepairCollectNode extends SlotFillingNode {
 | `.optional()` | 非必填，不会被追问 |
 | `.group("年龄范围")` | 必填组：组里填了任意一个就算收齐，追问时说组名 |
 | `.extractOnly()` | 只让模型抽取、不保存的辅助字段，在 `normalize` 里换算成真正的槽位 |
+| `.managed()` | 由节点代码维护、不让模型抽取的槽位（例如用户从候选里选定的内容，在 `afterMerge` 里写入）；仍参与必填判断和修改 |
 | `.describe("...")` | 给抽取模型的补充说明：取值规则、常见说法 |
 
 更多定制点：`normalize`（抽取结果换算，`Slots.CLEAR` 表示清空某个槽位）、`describe`（确认文案里的描述）、
+`afterMerge`（合并后需要模型或外部服务的处理，例如按场景生成候选）、`revalidate`（已保存的值会过期时，例如发送时间）、
+`choicesText`（要用户从候选里选时，由代码原样展示候选）、`askItem`（交给追问模型的"要问什么"）、
 `completedText`（`nextNode()` 为 null、收齐即完成任务时说的话）。自动推进到下一阶段时不调用它：
 框架暂存本轮前面阶段已保存的信息，由后续追问统一确认，或由 `ConfirmNode` 展示完整汇总，避免连续出现多段“好的……”。
 顺序任务完整例子见测试夹具 `smart-flow-demo/src/test/java/com/example/smartflow/demo/node/CollectTargetNode.java`。当前可运行的 Demo 采用四个无序收集节点，见 [短信活动开发入口](sms-activity.md)。
@@ -144,6 +147,29 @@ public class RepairCollectNode extends SlotFillingNode {
 
 路由会沿入口到当前阶段的收集链自动列出可修改字段。用户在后续阶段要求修改前面阶段的信息时，
 框架根据 `editSlots` 返回所属节点；只说要改但没给新值时，保留旧值并追问，待有效新值通过该节点的校验后再推进。
+
+### 没有先后顺序的几项信息：SlotGroupNode
+
+几项信息没有先后顺序、用户可能一句话同时说好几项时，每项仍写成一个 `SlotFillingNode`（不声明 `routeSpec`），
+再用一个 `SlotGroupNode` 把它们组成无序组，作为任务入口：
+
+```java
+@Component
+public class CreateEventNode extends SlotGroupNode {
+    public CreateEventNode(NodeSupport support, EventPlaceNode place, EventTimeNode time) {
+        super(support, List.of(place, time));   // 顺序就是追问顺序
+    }
+    @Override public String id() { return "create_event"; }
+    @Override public Optional<RouteSpec> routeSpec() { return Optional.of(RouteSpec.taskEntry(...)); }
+    @Override protected String stageGoal() { return "收集活动地点和时间，顺序不限"; }
+    @Override protected String nextNode() { return "confirm_event"; }
+}
+```
+
+组节点用全部成员的槽位做一次抽取（带最近对话），本轮提到的成员各自校验合并（含 `afterMerge`），
+都收齐后推进到 `nextNode()`，否则统一追问，规则和单个收集节点相同。任务停在组节点上，下一轮回答哪一项都可以；
+用户要求修改某个成员的字段时，路由会回到组节点。成员的槽位名在组内不能重复。
+确认节点提交前可以用组节点的 `complete(task)` 复查。完整例子见 [短信活动开发入口](sms-activity.md)。
 
 ## 5. 任务最后一步：确认后提交（ConfirmNode）
 

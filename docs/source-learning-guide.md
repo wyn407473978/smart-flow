@@ -1,6 +1,6 @@
  # smart-flow 源码学习导读：从启动到一轮对话
 
-> 当前可运行 Demo 已改为“短信活动路由 + 四个无序收集节点 + 最终确认提交”，开发请先看 [短信活动说明](sms-activity.md)。本文的旧版顺序活动示例用于讲解框架机制，其 `CollectTargetNode`、`ChooseTemplateNode`、`SubmitActivityNode` 实现已移到 `src/test/java`，不参与运行时注册。
+> 当前可运行 Demo 是“短信活动收集组（`SlotGroupNode`）+ 四个无序的 `SlotFillingNode` 成员 + 最终确认提交”，开发请先看 [短信活动说明](sms-activity.md)。本文的旧版顺序活动示例用于讲解框架机制，其 `CollectTargetNode`、`ChooseTemplateNode`、`SubmitActivityNode` 实现已移到 `src/test/java`，不参与运行时注册。
 
 这份文档面向这样的你：项目已经能跑，但代码主要由 AI 生成，你想真正掌握它，知道对象从哪里来、方法由谁调用、状态如何保存，以及为什么采用这些设计。
 

@@ -158,4 +158,20 @@ class SlotsTest {
         assertThrows(IllegalArgumentException.class, () -> SlotSpec.integer("1x", "X").build());
         assertThrows(IllegalArgumentException.class, () -> SlotSpec.integer("x", "X").range(10, 1).build());
     }
+
+    @Test
+    void managedSlotsAreHiddenFromExtractionAndIgnoredWhenMerging() {
+        List<SlotSpec> specs = List.of(
+                SlotSpec.string("brief", "短信场景").build(),
+                SlotSpec.string("content", "短信内容").managed().build());
+        assertFalse(Slots.fieldGuide(specs).contains("content"));
+        assertEquals("{\"brief\": null}", Slots.jsonTemplate(specs));
+
+        Map<String, Object> slots = new LinkedHashMap<>();
+        Slots.merge(specs, slots, Map.of("brief", "健康讲座", "content", "模型编的短信"), null);
+        assertEquals(Map.of("brief", "健康讲座"), slots);
+        // 仍然参与必填判断，由节点代码写入
+        assertEquals(List.of("短信内容"), Slots.missing(specs, slots));
+        assertThrows(IllegalArgumentException.class, () -> SlotSpec.string("x", "X").extractOnly().managed().build());
+    }
 }
