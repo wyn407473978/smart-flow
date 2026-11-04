@@ -4,6 +4,7 @@ import org.bsc.langgraph4j.state.AgentState;
 import org.bsc.langgraph4j.state.Channel;
 import org.bsc.langgraph4j.state.Channels;
 
+import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -46,6 +47,14 @@ public class FlowState extends AgentState {
     public static final String NEXT_NODE = "nextNode";
     /** List&lt;String&gt;，本轮各节点产出的回复片段，按顺序追加 */
     public static final String REPLIES = "replies";
+    /** 本轮自动推进的收集阶段已保存的信息，供后续追问统一确认；不写入 SessionState。 */
+    public static final String COLLECTED_STAGE_INFO = "collectedStageInfo";
+
+    public record CollectedStageInfo(String taskId, String nodeId, String description) implements Serializable { }
+
+    public List<CollectedStageInfo> collectedStageInfo() {
+        return this.<List<CollectedStageInfo>>value(COLLECTED_STAGE_INFO).orElse(List.of());
+    }
 
     /** 只有 REPLIES 需要追加语义，其余 key 默认覆盖 */
     public static final Map<String, Channel<?>> SCHEMA = Map.of(

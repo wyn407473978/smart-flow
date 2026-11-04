@@ -43,8 +43,8 @@ import java.util.Map;
  * 需要定制时覆盖：{@link #normalize}（抽取结果换算，例如"年龄不限"→ 0～120）、
  * {@link #validateTogether}（跨字段校验）、{@link #describe}（确认文案里的描述）、{@link #completedText}。
  * <p>
- * 从确认节点"修改信息"回来时，所有槽位都已收齐：用户这句话改到了本阶段的信息就会说一句确认，
- * 没改到就不说话直接往后走，最后回到确认节点重新确认。
+ * 自动推进时只保存信息，不逐阶段输出确认；后续追问统一说明本轮保存的信息，
+ * 或由确认节点展示完整汇总。没有下一阶段时仍输出完成文案。
  */
 public abstract class SlotFillingNode extends AbstractNode {
 
@@ -69,10 +69,12 @@ public abstract class SlotFillingNode extends AbstractNode {
             %s当前步骤：%s。
 
             已收集：%s
+            本轮前面步骤已保存、尚未向用户回复的信息：%s
             还缺少：%s
             %s
-            请用一到两句话回复用户：如果本轮刚收集到新信息，先简短确认；然后自然地追问还缺少的信息。
-            只能确认本步骤实际保存的信息。用户要求修改但还没提供有效新值时，必须追问新内容，不能说已修改成功。
+            请用一到两句话回复用户：将前面步骤与本步骤本轮新保存的信息合并成一次简短确认，然后自然地追问还缺少的信息。
+            没有新信息时直接追问；不要按步骤分别确认或重复说“好的”，不要提到内部步骤流转。
+            只能确认上面列出的实际保存信息。用户要求修改但还没提供有效新值时，必须追问新内容，不能说已修改成功。
             语气亲切简洁，不要编造用户没说过的信息，不要提到"槽位""字段"这类技术词。
             """;
 
@@ -138,7 +140,7 @@ public abstract class SlotFillingNode extends AbstractNode {
         return Slots.missing(slots(), slots);
     }
 
-    /** 收齐时的确认文案（只在本轮有信息变化时说） */
+    /** 没有下一阶段、收齐即完成任务时的文案；自动推进时不调用。 */
     protected String completedText(Map<String, Object> slots) {
         return "好的，已记录：" + describe(slots) + "。";
     }
@@ -184,7 +186,8 @@ public abstract class SlotFillingNode extends AbstractNode {
         prompts.put("extract_slots · system", extractPrompt());
         prompts.put("ask_missing · system", ASK_PROMPT.formatted(
                 support.assistant().name(), support.assistant().persona(), contextLine(), stageGoal(),
-                "{已收集信息}（本轮有/没有新收集到的信息）", "{还缺少的信息}", "{校验错误，没有则为空}\n"));
+                "{已收集信息}（本轮有/没有新收集到的信息）", "{本轮前面步骤已保存的信息，没有则为无}",
+                "{还缺少的信息}", "{校验错误，没有则为空}\n"));
         return prompts;
     }
 
@@ -215,12 +218,16 @@ public abstract class SlotFillingNode extends AbstractNode {
         Map<String, Object> updates = updates();
         if (missing.isEmpty() && result.errors().isEmpty()) {
             String next = nextNode();
-            if (result.changed() || next == null) {
-                updates.put(FlowState.REPLIES, emitText(scope, completedText(task.getSlots())));
-            }
             if (next == null) {
+                updates.put(FlowState.REPLIES, emitText(scope, completedText(task.getSlots())));
                 edit.complete();
             } else {
+                if (result.changed()) {
+                    List<FlowState.CollectedStageInfo> collected = new ArrayList<>(state.collectedStageInfo());
+                    collected.removeIf(info -> info.taskId().equals(task.getTaskId()) && info.nodeId().equals(id()));
+                    collected.add(new FlowState.CollectedStageInfo(task.getTaskId(), id(), describe(task.getSlots())));
+                    updates.put(FlowState.COLLECTED_STAGE_INFO, collected);
+                }
                 edit.advanceTo(next);
                 goTo(updates, next);
             }
@@ -275,9 +282,14 @@ public abstract class SlotFillingNode extends AbstractNode {
             errorLine += "用户要求修改但尚未收到有效新内容：" + String.join("、", editing) + "。原值暂时保留，请追问新内容。\n";
         }
         String newInfoLine = result.changed() ? "（本轮有新收集到的信息）" : "（本轮没有收集到新信息）";
+        String previousInfo = state.collectedStageInfo().stream()
+                .filter(info -> info.taskId().equals(task.getTaskId()) && !info.nodeId().equals(id()))
+                .map(FlowState.CollectedStageInfo::description)
+                .collect(java.util.stream.Collectors.joining("；"));
         String sys = ASK_PROMPT.formatted(
                 support.assistant().name(), support.assistant().persona(), contextLine(), stageGoal(),
                 describe(task.getSlots()) + " " + newInfoLine,
+                previousInfo.isBlank() ? "（无）" : previousInfo,
                 missing.isEmpty() ? "（无）" : String.join("、", Slots.missingWithHints(slots(), missing)),
                 errorLine);
 

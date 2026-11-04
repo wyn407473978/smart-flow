@@ -78,6 +78,7 @@ class WorkflowScenarioTest {
     private final Deque<String> extractScript = new ArrayDeque<>();
     /** 确认节点判断用户回复的模型输出脚本 */
     private final Deque<String> confirmScript = new ArrayDeque<>();
+    private final Deque<String> askReplyScript = new ArrayDeque<>();
     private final List<String> llmCalls = new ArrayList<>();
     private final FakeSessions sessions = new FakeSessions();
     private final FakeMemoryRepository memoryRepo = new FakeMemoryRepository();
@@ -549,7 +550,8 @@ class WorkflowScenarioTest {
         extractScript.add("{\"region\":\"阳光社区\"}");
         extractScript.add("{}");   // 同一轮进入 C2，C2 从这句话里没抽到模版和时间，追问
         var done = turn("s1", "阳光社区", List.of("router", "collect_target", "choose_template"), "choose_template");
-        assertTrue(done.reply().contains("60 岁及以上、女性、阳光社区"), "确认文案");
+        assertEquals("【流式回复】", done.reply(), "自动推进节点不先发送确认文案");
+        assertTrue(last(systemPrompts.get("ask")).contains("60 岁及以上、女性、阳光社区"));
         assertEquals(60, done.state().getTaskStack().get(0).getSlots().get("ageMin"));
         assertTrue(llmCalls.contains("router/route#retry"), "应记录重试调用");
     }
@@ -577,7 +579,8 @@ class WorkflowScenarioTest {
         extractScript.add("{}");
         var r1 = turn(sid, "帮我办个活动，面向阳光社区60岁以上的女性",
                 List.of("router", "collect_target", "choose_template"), "choose_template");
-        assertTrue(r1.reply().startsWith("好的，活动的目标人群确认为：60 岁及以上、女性、阳光社区。"), r1.reply());
+        assertEquals("【流式回复】", r1.reply());
+        assertTrue(last(systemPrompts.get("ask")).contains("本轮前面步骤已保存、尚未向用户回复的信息：60 岁及以上、女性、阳光社区"));
     }
 
     /** 走到确认这一步：先收齐目标人群，再补模版和时间，进入 C3 展示确认内容。 */
@@ -586,12 +589,66 @@ class WorkflowScenarioTest {
         routerScript.add(CONTINUE_ACTIVITY);
         extractScript.add("{\"template\":\"敬老关爱\",\"activityTime\":\"下周六上午\"}");
         var r2 = turn(sid, "敬老关爱，下周六上午", List.of("router", "choose_template", "submit_activity"), "submit_activity");
-        assertTrue(r2.reply().startsWith("好的，活动模版定为「敬老关爱」，时间是下周六上午。"), r2.reply());
+        assertTrue(r2.reply().startsWith("请确认以下信息："), r2.reply());
+        assertFalse(r2.reply().contains("活动模版定为"), "只展示一次最终汇总");
         assertTrue(r2.reply().contains("请确认以下信息：\n- 目标人群：60 岁及以上、女性、阳光社区\n- 活动模版：敬老关爱\n- 活动时间：下周六上午"),
                 r2.reply());
         TaskFrame task = r2.state().getTaskStack().get(0);
         assertEquals("ELDERLY_CARE", task.getSlots().get("template"), "枚举存编码");
         assertTrue(task.getAwaiting() != null, "确认节点在等用户确认");
+    }
+
+    /** 截图场景：C1 自动推进，C2 已有模版但缺时间，只发送 C2 的合并回复。 */
+    @Test
+    void consecutiveCollectionStagesProduceOneReply() {
+        routerScript.add("{\"action\":\"START\",\"intent\":\"ACTIVITY_CREATE\"}");
+        extractScript.add("{\"ageMin\":20,\"gender\":\"MALE\",\"region\":\"阳光社区\"}");
+        extractScript.add("{\"template\":\"PARENT_CHILD\"}");
+        String expected = "已记录：阳光社区、20 岁及以上男性，活动类型为亲子活动。请问计划安排在什么时间？";
+        askReplyScript.add(expected);
+        var result = turn("one-reply", "我要在阳光社区针对20岁以上的男生创建一个亲子活动",
+                List.of("router", "collect_target", "choose_template"), "choose_template");
+        // turn() 同时核对 SSE token 与最终回复；旧实现会在这里多出 C1 的固定确认。
+        assertEquals(expected, result.reply());
+        String prompt = last(systemPrompts.get("ask"));
+        assertTrue(prompt.contains("本轮前面步骤已保存、尚未向用户回复的信息：20 岁及以上、男性、阳光社区"));
+        assertTrue(prompt.contains("亲子活动"));
+        assertTrue(prompt.contains("还缺少：活动时间"));
+        assertEquals("PARENT_CHILD", result.state().getTaskStack().get(0).getSlots().get("template"));
+        assertFalse(sessions.states.get("one-reply").contains("collectedStageInfo"), "暂存确认信息不能跨轮持久化");
+
+        routerScript.add(CONTINUE_ACTIVITY);
+        extractScript.add("{}");
+        turn("one-reply", "我再想想", List.of("router", "choose_template"), "choose_template");
+        assertTrue(last(systemPrompts.get("ask")).contains("本轮前面步骤已保存、尚未向用户回复的信息：（无）"));
+    }
+
+    @Test
+    void allSlotsInOneTurnOnlyEmitFinalConfirmation() {
+        routerScript.add("{\"action\":\"START\",\"intent\":\"ACTIVITY_CREATE\"}");
+        extractScript.add("{\"ageMin\":20,\"gender\":\"MALE\",\"region\":\"阳光社区\"}");
+        extractScript.add("{\"template\":\"PARENT_CHILD\",\"activityTime\":\"下周六上午\"}");
+        var result = turn("all-slots", "在阳光社区给20岁以上男性办亲子活动，时间是下周六上午",
+                List.of("router", "collect_target", "choose_template", "submit_activity"), "submit_activity");
+        assertTrue(result.reply().startsWith("请确认以下信息："), result.reply());
+        assertTrue(result.reply().contains("20 岁及以上、男性、阳光社区"));
+        assertTrue(result.reply().contains("亲子活动"));
+        assertTrue(result.reply().contains("下周六上午"));
+        assertFalse(result.reply().contains("好的，"), "C1 和 C2 均不应发送中间确认");
+        assertFalse(systemPrompts.containsKey("ask"), "信息收齐后不额外调用追问模型");
+    }
+
+    @Test
+    void terminalCollectionStageStillEmitsCompletion() throws Exception {
+        nodes.set(nodes.indexOf(collectTarget), new CollectTargetNode(support) {
+            @Override protected String nextNode() { return null; }
+        });
+        catalog.refresh();
+        rebuild();
+        routerScript.add("{\"action\":\"START\",\"intent\":\"ACTIVITY_CREATE\"}");
+        extractScript.add("{\"ageMin\":20,\"gender\":\"MALE\",\"region\":\"阳光社区\"}");
+        var result = turn("terminal", "阳光社区20岁以上男性", List.of("router", "collect_target"), null);
+        assertEquals("好的，活动的目标人群确认为：20 岁及以上、男性、阳光社区。", result.reply());
     }
 
     private static String editActivity(String... fields) {
@@ -628,8 +685,9 @@ class WorkflowScenarioTest {
         assertEquals(Map.of("ageMin", 60, "gender", "FEMALE", "region", "杭州市西湖区"), saved.getSlots());
         assertEquals(taskId, saved.getTaskId(), "修改原任务，不创建新任务");
         assertTrue(saved.getEditingSlots().isEmpty());
-        assertTrue(changed.reply().contains("杭州市西湖区"), changed.reply());
-        assertFalse(changed.reply().contains("阳光社区"), changed.reply());
+        assertEquals("【流式回复】", changed.reply());
+        String prompt = last(systemPrompts.get("ask"));
+        assertTrue(prompt.contains("本轮前面步骤已保存、尚未向用户回复的信息：60 岁及以上、女性、杭州市西湖区"));
     }
 
     @Test
@@ -739,7 +797,8 @@ class WorkflowScenarioTest {
         extractScript.add("{}");                      // C2 没有变化，直接往后走
         var r = turn("f2", "性别改成男性",
                 List.of("router", "submit_activity", "collect_target", "choose_template", "submit_activity"), "submit_activity");
-        assertTrue(r.reply().startsWith("好的，活动的目标人群确认为：60 岁及以上、男性、阳光社区。"), r.reply());
+        assertTrue(r.reply().startsWith("请确认以下信息："), r.reply());
+        assertFalse(r.reply().contains("目标人群确认为"), "修改后只展示最终确认，不逐阶段播报");
         assertTrue(r.reply().contains("- 目标人群：60 岁及以上、男性、阳光社区"), "重新展示修改后的确认内容: " + r.reply());
         assertFalse(r.reply().contains("活动模版定为"), "C2 没有变化，不重复确认: " + r.reply());
 
@@ -840,6 +899,11 @@ class WorkflowScenarioTest {
         });
         assertEquals(expectedPath, res.nodePath());
         assertEquals(res.reply(), streamed.toString());
+        if (!res.reply().isBlank()) {
+            var saved = sessions.recentMessages(sid, 1).get(0);
+            assertEquals(HistoryMessage.ASSISTANT, saved.role());
+            assertEquals(res.reply(), saved.content(), "保存的助手消息应与 SSE 和最终回复一致");
+        }
         assertEquals("turn", events.get(0));
         assertEquals("done", events.get(events.size() - 1));
         String current = res.state().getTaskStack().isEmpty() ? null : res.state().getTaskStack().get(0).getCurrentNode();
@@ -929,6 +993,12 @@ class WorkflowScenarioTest {
                     String text = "查询结果：" + String.join("；", results) + finalSuffix;
                     handler.onPartialResponse(text);
                     handler.onCompleteResponse(ChatResponse.builder().aiMessage(AiMessage.from(text)).build());
+                    return;
+                }
+                if (who.equals("ask") && !askReplyScript.isEmpty()) {
+                    String reply = askReplyScript.pop();
+                    handler.onPartialResponse(reply);
+                    handler.onCompleteResponse(ChatResponse.builder().aiMessage(AiMessage.from(reply)).build());
                     return;
                 }
                 handler.onPartialResponse("【流式");
