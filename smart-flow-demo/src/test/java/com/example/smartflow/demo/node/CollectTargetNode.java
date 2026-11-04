@@ -8,7 +8,6 @@ import com.example.smartflow.node.slot.SlotErrors;
 import com.example.smartflow.node.slot.SlotFillingNode;
 import com.example.smartflow.node.slot.SlotSpec;
 import com.example.smartflow.node.slot.Slots;
-import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -26,7 +25,7 @@ import java.util.Optional;
  *   <li>{@link #validateTogether}：下限不能大于上限；下限、上限一起改，任何一个不合法两个都不写入</li>
  * </ul>
  */
-@Component
+/** 旧版工作流的回归测试夹具，不参与 Demo 的 Spring 节点注册。 */
 public class CollectTargetNode extends SlotFillingNode {
 
     public static final String SLOT_AGE_MIN = "ageMin";

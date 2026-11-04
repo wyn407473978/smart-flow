@@ -7,12 +7,11 @@ import com.example.smartflow.node.NodeScope;
 import com.example.smartflow.node.NodeSupport;
 import com.example.smartflow.node.NodeType;
 import com.example.smartflow.node.TaskStackEdit;
-import org.springframework.stereotype.Component;
 
 import java.util.Map;
 
 /** 旧会话兼容入口。保留任务及已收集数据，转到统一收集节点；新任务不经过这里。 */
-@Component
+/** 旧版工作流的回归测试夹具，不参与 Demo 的 Spring 节点注册。 */
 public class ChooseTemplateNode extends AbstractNode {
     public ChooseTemplateNode(NodeSupport support) { super(support); }
 

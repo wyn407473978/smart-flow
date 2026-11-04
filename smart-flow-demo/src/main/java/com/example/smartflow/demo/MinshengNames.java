@@ -22,4 +22,15 @@ public final class MinshengNames {
 
     // ---- 任务类型 ----
     public static final String TASK_ACTIVITY_CREATE = "ACTIVITY_CREATE";
+
+    /**
+     * 活动创建节点
+     */
+    public static final String ACTIVITY_CREATE = "ACTIVITY_CREATE";
+
+    public static final String ACTIVITY_REGION = "activity_region";
+    public static final String ACTIVITY_AUDIENCE = "activity_audience";
+    public static final String ACTIVITY_TIME = "activity_time";
+    public static final String ACTIVITY_TEMPLATE = "activity_template";
+    public static final String ACTIVITY_SUBMIT = "activity_submit";
 }

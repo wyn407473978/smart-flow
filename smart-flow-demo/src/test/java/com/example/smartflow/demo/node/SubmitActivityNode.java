@@ -4,7 +4,6 @@ import com.example.smartflow.demo.MinshengNames;
 import com.example.smartflow.flow.TaskFrame;
 import com.example.smartflow.node.NodeSupport;
 import com.example.smartflow.node.confirm.ConfirmNode;
-import org.springframework.stereotype.Component;
 
 import java.util.Locale;
 import java.util.Map;
@@ -15,7 +14,7 @@ import java.util.Map;
  * 演示用：{@link #commit} 没有真正调用业务系统，只用幂等键生成一个固定的活动编号。
  * 接真实接口时，把幂等键作为请求号传给业务系统（或者存进业务表的唯一索引），重复确认不会创建两个活动。
  */
-@Component
+/** 旧版工作流的回归测试夹具，不参与 Demo 的 Spring 节点注册。 */
 public class SubmitActivityNode extends ConfirmNode {
 
     private final CollectTargetNode collectTarget;

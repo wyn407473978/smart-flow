@@ -1,5 +1,7 @@
  # smart-flow 源码学习导读：从启动到一轮对话
 
+> 当前可运行 Demo 已改为“短信活动路由 + 四个无序收集节点 + 最终确认提交”，开发请先看 [短信活动说明](sms-activity.md)。本文的旧版顺序活动示例用于讲解框架机制，其 `CollectTargetNode`、`ChooseTemplateNode`、`SubmitActivityNode` 实现已移到 `src/test/java`，不参与运行时注册。
+
 这份文档面向这样的你：项目已经能跑，但代码主要由 AI 生成，你想真正掌握它，知道对象从哪里来、方法由谁调用、状态如何保存，以及为什么采用这些设计。
 
 不要求你先熟悉 LangGraph4j。需要的 Java、Spring 概念会放在对应代码旁边解释。本文描述的是当前仓库实现；流程图是为了讲清关系，不代表所有对象严格按图上的排列顺序创建。示例模型输出和状态片段会明确标为示意，实际输出要以运行记录为准。
@@ -134,7 +136,7 @@ SpringApplication.run(SmartFlowApplication.class, args);
 
 ### 4.3 构造器注入：依赖由 Spring 传入
 
-打开 [CollectTargetNode.java](../smart-flow-demo/src/main/java/com/example/smartflow/demo/node/CollectTargetNode.java)：
+打开 [CollectTargetNode.java](../smart-flow-demo/src/test/java/com/example/smartflow/demo/node/CollectTargetNode.java)：
 
 ```java
 public CollectTargetNode(NodeSupport support) {
@@ -403,7 +405,7 @@ Map 是状态补丁，只放需要改变的 key。`FlowState.SCHEMA` 为 `REPLIE
 
 ### 11.1 先看业务声明，再看通用实现
 
-打开 [CollectTargetNode](../smart-flow-demo/src/main/java/com/example/smartflow/demo/node/CollectTargetNode.java)，再看 [SlotFillingNode](../smart-flow-core/src/main/java/com/example/smartflow/node/slot/SlotFillingNode.java)。
+打开 [CollectTargetNode](../smart-flow-demo/src/test/java/com/example/smartflow/demo/node/CollectTargetNode.java)，再看 [SlotFillingNode](../smart-flow-core/src/main/java/com/example/smartflow/node/slot/SlotFillingNode.java)。
 
 Demo 现在把年龄上下限、性别、区域、模版和时间放在同一个收集节点。用户一句话先说模版和时间，也会立即校验保存，不必等目标人群收齐。
 `ChooseTemplateNode` 只负责旧会话跳转，新任务走 `collect_target → submit_activity`。类名 `CollectTargetNode` 和节点 ID 沿用旧版本。
@@ -436,7 +438,7 @@ Demo 现在把年龄上下限、性别、区域、模版和时间放在同一个
 
 ### 11.3 确认节点为什么要独立存在
 
-打开 [ConfirmNode](../smart-flow-core/src/main/java/com/example/smartflow/node/confirm/ConfirmNode.java) 和 [SubmitActivityNode](../smart-flow-demo/src/main/java/com/example/smartflow/demo/node/SubmitActivityNode.java)。
+打开 [ConfirmNode](../smart-flow-core/src/main/java/com/example/smartflow/node/confirm/ConfirmNode.java) 和 [SubmitActivityNode](../smart-flow-demo/src/test/java/com/example/smartflow/demo/node/SubmitActivityNode.java)。
 
 第一次进入确认节点，展示汇总并设置 `awaiting`，结束本轮。下一轮到达时才判断确认、修改、取消或不明确。
 

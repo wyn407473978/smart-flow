@@ -5,6 +5,8 @@ Spring Boot 3.5 + LangChain4j 1.19 + LangGraph4j 1.8（LTS）+ MyBatis 3 + Postg
 框架和业务分开放在不同模块里：新工作流依赖 `smart-flow-core`（需要 HTTP 接口和测试页再加 `smart-flow-web`），
 只写自己的节点和工具，引擎、路由、记忆、trace 都不用改。`smart-flow-demo` 是一个完整的示例工作流（智慧民生）。
 
+**修改当前短信活动 Demo：见 [短信活动开发入口](docs/sms-activity.md)**（独立活动路由 + 四个无序收集节点 + 最终确认提交）。
+
 **从零搭一个新工作流：见 [docs/new-workflow.md](docs/new-workflow.md)**（以物业报修为例，3 个节点）。
 
 **理解架构与对话流转：见 [架构文档](docs/architecture.md)**（模块职责、状态设计、执行流程、追问与插话、完整对话示例及源码阅读顺序）。
@@ -29,13 +31,16 @@ core 和 web 都是 Spring Boot 自动配置（`FlowCoreAutoConfiguration`、`Fl
 | A 路由 | `router` | ROUTER | 每轮必经。提示词由子节点的路由声明自动拼成；模型判断 action + intent + 待修改字段，去向和任务栈变化由代码决定 |
 | B2 业务查询 | `biz_query` | TOOL_AGENT | 挂载 `get_weather`（查天气，演示数据）、`get_user_info`（查本人信息：rise / 27 岁）；手写 tool loop，流式输出 |
 | B3 闲聊 | `chat` | CHAT | 流式回复；根路由的兜底节点 |
-| 活动信息收集 | `collect_target` | SLOT_FILLING | 统一抽取年龄上下限、性别、区域、模版、时间；代码校验、合并并决定追问哪几项，追问由模型措辞，收齐直接进入确认 |
-| 旧阶段兼容 | `choose_template` | COMPATIBILITY | 仅为旧会话保留，携带原任务数据转到 `collect_target`；新任务不经过这里 |
-| 确认创建 | `submit_activity` | CONFIRM | 从已保存数据展示汇总，确认后创建（带幂等键）；修改时回到 `collect_target` |
+| 短信活动路由 | `ACTIVITY_CREATE` | ROUTER | 根据用户输入分发区域、人群、时间、短信模版；四项收齐才确认提交 |
+| 区域收集 | `activity_region` | SLOT_FILLING | 保留用户提供的短信发送区域 |
+| 人群确认 | `activity_audience` | SLOT_FILLING | 全部人群、性别、年龄或组合条件 |
+| 时间收集 | `activity_time` | SLOT_FILLING | 相对时间转换为北京时间 `yyyy-MM-dd HH:mm:ss`，严格校验晚于当前时间 |
+| 短信模版 | `activity_template` | SLOT_FILLING | 根据短信原文或场景推荐三个候选，用户明确选定一个 |
+| 确认提交 | `activity_submit` | CONFIRM | 展示真实参数，确认后调用幂等 mock 接口，成功结束任务 |
 
-追问时，已记录信息和校验提示由代码先输出；这轮问哪几项由代码按声明字段决定（优先处理校验错误和待修改项，每轮最多两项，再补缺失的必填项），措辞交给模型，模型超时或出错时用代码文案。可用 `flow.slot-filling.ask-mode: code` 切回纯代码追问。
-模版和时间可以在第一句话就保存；“下周六上午”已满足当前时间字段，不额外要求具体起止时刻。
-人数和活动名称未在 Demo 中声明，不会被追问或保存；追问模型拿不到已收集的信息，不会确认没保存的内容。
+四个收集节点没有业务先后顺序，支持一句提供多项、任意顺序补充和修改。只说“男性”或“20岁以上”就能确定人群条件，未限制维度默认不限。
+只有日期但没有具体时刻会继续追问；选择短信模版后才进入最终确认；提交前会再次校验时间，防止确认期间过期。
+旧节点 ID 保留兼容跳转，旧实现放在测试目录用于框架回归。完整规则、对话示例和修改入口见 [短信活动说明](docs/sms-activity.md)。
 
 支持的对话行为：开始任务、多轮补充、修改已填信息、任务中插话（回答后提示继续）、确认前修改、取消任务、路由输出异常兜底。
 
@@ -105,7 +110,8 @@ smart-flow-web/   web/ 下是 SSE 接口、调试查询接口；resources/static
 
 smart-flow-demo/src/main/java/com/example/smartflow/demo/
   SmartFlowApplication、MinshengNames（节点 ID、任务类型）
-  node/  闲聊、业务查询、活动创建各节点
+  node/      闲聊、业务查询
+  activity/  短信活动路由、四个参数收集节点、最终提交及 mock 接口
   tool/  演示工具（天气、个人信息）
 ```
 
@@ -145,7 +151,7 @@ public class ComplaintNode extends AbstractNode {
 | 工厂方法 | 含义 | 例子 |
 |---|---|---|
 | `oneShot` | 一次性节点，回答完就结束；任务进行中被路由到算插话，回答后提示继续任务 | 业务查询、投诉 |
-| `taskEntry` | 多轮任务的入口，路由到这里会开启任务并压栈 | 活动创建（`collect_target`） |
+| `taskEntry` | 多轮任务的入口，路由到这里会开启任务并压栈 | 短信活动创建（`ACTIVITY_CREATE`） |
 | `fallback` | 兜底，意图不认识或模型输出异常时去这里，每个路由节点有且只有一个 | 闲聊 |
 
 任务内部的确认阶段不声明 `routeSpec`，由收集节点推进过去；旧阶段兼容节点也不挂在路由选项中。框架提供了两种现成的任务阶段节点，一般不用自己处理任务栈：
@@ -161,7 +167,7 @@ public class ComplaintNode extends AbstractNode {
 `SlotFillingNode` 默认用 `stageGoal()`，`ConfirmNode` 默认是"等用户确认"。
 
 任务进入后续阶段后仍可修改前面阶段的信息：路由根据 `editSlots` 回到字段所属的收集节点。
-例如确认时说“我想修改区域”，会回到 `collect_target` 追问新区域；旧区域暂时保留，新值通过校验后才替换，收齐后重新确认。
+通用顺序任务根据字段返回所属收集节点。当前短信活动采用自定义分组路由：确认时说“我想修改区域”，会回到活动路由再分发区域节点；旧区域暂时保留，新值通过校验后才替换，收齐后重新确认。
 待修改字段保存在任务帧的 `editingSlots` 中，跨轮、插话后仍会保留；不会因为旧值已经填过而跳过修改。
 
 自动完成的事情：
@@ -279,8 +285,9 @@ mvn test
 - `FrameworkResourcesTest`（core）：Mapper XML、自动配置注册文件、建表脚本都打进了 jar
 - `FlowPropertiesBindingTest`（core）：配置 record 都能被 Spring Boot 绑定
 - `SlotsTest`、`TaskStackEditTest`、`ConfirmNodeTest`（core）：槽位转换 / 校验 / 合并、任务栈操作、确认词判定
-- `CollectTargetNodeTest`（demo）：业务槽位规则（年龄不限、范围替换、下限不能大于上限）
-- `WorkflowScenarioTest`（demo）：多轮场景测试，用按脚本返回的 stub 模型 + 内存存储，不需要数据库和真实模型。
+- `ActivityWorkflowTest`（demo）：短信活动全部24种收集顺序、同句多参数、三模版选择、未来时间和过期复验、修改后确认、插话、取消、mock失败重试与幂等
+- `CollectTargetNodeTest`（demo）：旧工作流测试夹具的槽位规则回归（年龄不限、范围替换、下限不能大于上限）
+- `WorkflowScenarioTest`（demo）：基于旧版顺序任务夹具的框架多轮回归测试，用按脚本返回的 stub 模型 + 内存存储，不需要数据库和真实模型。
   覆盖开始任务、补充、插话、非法 JSON 重试、统一收集→确认同轮流转、提前提供模版和时间、禁止额外字段追问、旧会话兼容、确认后创建、确认前修改、写操作失败重试、取消、路由兜底
 
 这两类测试就是后续 Evals 的起点：场景脚本保留，把 stub 换成真实模型 + LLM 扮演用户，就是端到端评测。

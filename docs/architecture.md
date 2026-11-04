@@ -1,5 +1,7 @@
 # smart-flow 架构与对话流转
 
+> 当前可运行 Demo 已改为“短信活动路由 + 四个无序收集节点 + 最终确认提交”，开发请先看 [短信活动说明](sms-activity.md)。本文的旧版顺序活动示例用于讲解框架机制，其 `CollectTargetNode`、`ChooseTemplateNode`、`SubmitActivityNode` 实现已移到 `src/test/java`，不参与运行时注册。
+
 本文面向第一次阅读项目的开发者，说明当前实现的职责划分、状态保存方式和执行路径。示例采用 `smart-flow-demo` 的智慧民生工作流，并包含 `AbstractNode` 拆分后的组件设计。
 
 建议先读第 1～5 节建立整体认识，再结合第 10 节的完整对话理解跨轮流转，最后按第 14 节的顺序阅读源码。搭建新业务的具体代码见 [新工作流接入指南](new-workflow.md)。

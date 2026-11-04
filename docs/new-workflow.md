@@ -137,7 +137,7 @@ public class RepairCollectNode extends SlotFillingNode {
 更多定制点：`normalize`（抽取结果换算，`Slots.CLEAR` 表示清空某个槽位）、`describe`（确认文案里的描述）、
 `completedText`（`nextNode()` 为 null、收齐即完成任务时说的话）。自动推进到下一阶段时不调用它：
 框架暂存本轮前面阶段已保存的信息，由后续追问统一确认，或由 `ConfirmNode` 展示完整汇总，避免连续出现多段“好的……”。
-完整例子见 demo 的 `CollectTargetNode`。
+顺序任务完整例子见测试夹具 `smart-flow-demo/src/test/java/com/example/smartflow/demo/node/CollectTargetNode.java`。当前可运行的 Demo 采用四个无序收集节点，见 [短信活动开发入口](sms-activity.md)。
 
 任务有多个收集阶段时，中间阶段也写成 `SlotFillingNode`，**不声明 `routeSpec`**（只能由上一阶段推进过来），
 上一阶段的 `nextNode()` 指向它。
