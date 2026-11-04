@@ -49,10 +49,20 @@ flow:
     reasoning-effort: none
     # 后台记忆任务（滚动摘要、长期记忆抽取）用的模型，不配置时用 router-model
     # memory-model: deepseek-flash
+    # 收集节点追问用的流式模型（只写一两句话，用户在等），不配置时用 router-model
+    # ask-model: deepseek-flash
     temperature: 0.3
     timeout-seconds: 60
     # 打开后会在日志里打印发给模型的 HTTP 报文，排查兼容性问题时用
     log-http: false
+  # 收集节点缺信息时的追问：已记录信息和"问哪几项"始终由代码决定
+  slot-filling:
+    # model：追问由模型措辞（能回应"我再想想""你推荐一个"），超时或出错时退回代码文案；code：全部由代码生成
+    ask-mode: model
+    # 追问模型多久没输出第一个字就放弃、改用代码文案（毫秒）
+    first-token-timeout-ms: 2000
+    # 追问最多输出多少 token
+    max-output-tokens: 120
   memory:
     # 节点默认带多少条历史消息（user + assistant 各算一条），节点可以通过 historyPolicy() 覆盖
     recent-messages: 12

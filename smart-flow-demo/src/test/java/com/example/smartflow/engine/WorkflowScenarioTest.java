@@ -27,6 +27,7 @@ import com.example.smartflow.node.confirm.ConfirmNode.CommitResult;
 import com.example.smartflow.node.RouterNode;
 import com.example.smartflow.node.route.RouteCatalog;
 import com.example.smartflow.node.route.RouteSpec;
+import com.example.smartflow.node.slot.AskMode;
 import com.example.smartflow.node.slot.SlotFillingNode;
 import com.example.smartflow.node.slot.SlotSpec;
 import com.example.smartflow.session.SessionRepository;
@@ -80,6 +81,8 @@ class WorkflowScenarioTest {
     private final Deque<String> extractScript = new ArrayDeque<>();
     /** 确认节点判断用户回复的模型输出脚本 */
     private final Deque<String> confirmScript = new ArrayDeque<>();
+    /** 追问模型的输出脚本。特殊值：SLOW（超过首字超时才输出）、ERROR（直接报错）、BREAK（输出一半后报错） */
+    private final Deque<String> askScript = new ArrayDeque<>();
     private final List<String> llmCalls = new ArrayList<>();
     private final FakeSessions sessions = new FakeSessions();
     private final FakeMemoryRepository memoryRepo = new FakeMemoryRepository();
@@ -101,9 +104,11 @@ class WorkflowScenarioTest {
     /** toolCallId → [工具名, 参数, 发起它的模型调用(节点/用途), 状态, 结果] */
     private final Map<String, List<String>> toolCalls = new java.util.LinkedHashMap<>();
 
+    /** 默认用代码追问，便于逐字断言追问计划；模型追问另有专门的场景（见 useAskMode） */
     private FlowProperties props = new FlowProperties(
             new FlowProperties.Model("http://stub", "stub", "chat", "router", 0.3, 5, false),
-            new FlowProperties.Memory(12), new FlowProperties.Sse(180));
+            new FlowProperties.Memory(12), new FlowProperties.Sse(180), null,
+            new FlowProperties.SlotFilling(AskMode.CODE, null, null));
     private final FakeTrace trace = new FakeTrace();
     private final TurnRegistry turns = new TurnRegistry();
     private NodeSupport support;
@@ -127,7 +132,7 @@ class WorkflowScenarioTest {
 
     /** 用指定的记忆配置重建节点和引擎（测试摘要阈值、token 上限时用） */
     private void useMemoryConfig(FlowProperties.Memory memoryConfig) throws Exception {
-        props = new FlowProperties(props.model(), memoryConfig, props.sse());
+        props = new FlowProperties(props.model(), memoryConfig, props.sse(), props.assistant(), props.slotFilling());
         support = new NodeSupport(models, trace, turns, MAPPER, props);
         nodes.clear();
         collectTarget = new CollectTargetNode(support);
@@ -137,6 +142,13 @@ class WorkflowScenarioTest {
                 new BizQueryNode(support, catalog, new WeatherTool(MAPPER), new UserInfoTool(MAPPER))));
         catalog.refresh();
         rebuild();
+    }
+
+    /** 切换追问方式（会重建节点和引擎） */
+    private void useAskMode(AskMode mode, Integer firstTokenTimeoutMs) throws Exception {
+        props = new FlowProperties(props.model(), props.memory(), props.sse(), props.assistant(),
+                new FlowProperties.SlotFilling(mode, firstTokenTimeoutMs, null));
+        useMemoryConfig(props.memory());
     }
 
     private void rebuild() throws Exception {
@@ -729,6 +741,97 @@ class WorkflowScenarioTest {
         assertEquals(result.reply(), result.state().getTaskStack().get(0).getAwaiting());
     }
 
+    // ---------------------------------------------------------------- 模型追问（ask-mode: model）
+
+    private static final String START_ACTIVITY = "{\"action\":\"START\",\"intent\":\"ACTIVITY_CREATE\"}";
+    private static final String CODE_FIRST_QUESTION = "请补充：年龄范围、性别（可选：男性、女性、不限性别）。";
+
+    /** 事实由代码先出，模型只接着写追问；模型拿不到已收集的信息，也就没法确认没保存的内容 */
+    @Test
+    void modelAskStreamsQuestionAfterCodeFacts() throws Exception {
+        useAskMode(AskMode.MODEL, null);
+        routerScript.add(START_ACTIVITY);
+        extractScript.add("{\"region\":\"阳光社区\",\"participantCount\":1000}");
+        askScript.add("活动主要面向哪个年龄段、什么性别呢？后面还会确认模版和时间。");
+        var result = turn("model-ask", "在阳光社区办个活动，大概1000人", List.of("router", "collect_target"), "collect_target");
+
+        assertEquals("当前已记录：阳光社区。\n活动主要面向哪个年龄段、什么性别呢？后面还会确认模版和时间。", result.reply());
+        String prompt = last(systemPrompts.get("ask"));
+        assertTrue(prompt.contains("追问模块"), prompt);
+        assertTrue(prompt.contains("本轮要问：年龄范围、性别（可选：男性、女性、不限性别）"), prompt);
+        assertTrue(prompt.contains("之后还要了解：活动模版、活动时间"), prompt);
+        assertFalse(prompt.contains("阳光社区"), "已收集的信息不交给追问模型");
+        assertFalse(prompt.contains("1000"), "没声明的信息更不会出现");
+        assertTrue(llmCalls.contains("collect_target/ask_missing"));
+        assertEquals(CODE_FIRST_QUESTION, result.state().getTaskStack().get(0).getAwaiting(),
+                "路由看到的仍是代码生成的追问计划");
+    }
+
+    @Test
+    void modelAskFallsBackToCodeQuestionWhenFirstTokenIsLate() throws Exception {
+        useAskMode(AskMode.MODEL, 200);
+        routerScript.add(START_ACTIVITY);
+        extractScript.add("{\"region\":\"阳光社区\"}");
+        askScript.add("SLOW");
+        var result = turn("model-slow", "在阳光社区办个活动", List.of("router", "collect_target"), "collect_target");
+        assertEquals("当前已记录：阳光社区。\n" + CODE_FIRST_QUESTION, result.reply());
+
+        Thread.sleep(800);
+        assertEquals(result.reply(), sessions.recentMessages("model-slow", 1).get(0).content(),
+                "模型迟到的输出不能混进已经发出的回复");
+    }
+
+    @Test
+    void modelAskErrorsFallBackToCodeQuestion() throws Exception {
+        useAskMode(AskMode.MODEL, null);
+        routerScript.add(START_ACTIVITY);
+        extractScript.add("{}");
+        askScript.add("ERROR");
+        var failed = turn("model-error", "帮我办活动", List.of("router", "collect_target"), "collect_target");
+        assertEquals(CODE_FIRST_QUESTION, failed.reply());
+
+        // 输出一半断了：已经推给用户的半句保留，另起一行补上完整的代码追问
+        routerScript.add(CONTINUE_ACTIVITY);
+        extractScript.add("{\"gender\":\"FEMALE\"}");
+        askScript.add("BREAK");
+        var broken = turn("model-error", "女性", List.of("router", "collect_target"), "collect_target");
+        assertEquals("当前已记录：女性。\n方便说一下\n请补充：年龄范围、目标区域或社区。", broken.reply());
+    }
+
+    /** 用户没给出有效信息、同一个问题要再问一次时，提示模型换个说法 */
+    @Test
+    void repeatedQuestionAsksModelToRephrase() throws Exception {
+        useAskMode(AskMode.MODEL, null);
+        routerScript.add(START_ACTIVITY);
+        extractScript.add("{}");
+        askScript.add("想先了解一下，这次活动面向哪个年龄段、什么性别？");
+        var first = turn("model-repeat", "帮我办活动", List.of("router", "collect_target"), "collect_target");
+        assertEquals("想先了解一下，这次活动面向哪个年龄段、什么性别？", first.reply());
+        assertFalse(last(systemPrompts.get("ask")).contains("上一轮已经问过"));
+
+        routerScript.add(CONTINUE_ACTIVITY);
+        extractScript.add("{}");
+        askScript.add("没关系，可以先定性别：男性、女性还是不限？年龄段大概说一下也行。");
+        var second = turn("model-repeat", "我再想想", List.of("router", "collect_target"), "collect_target");
+        assertEquals("没关系，可以先定性别：男性、女性还是不限？年龄段大概说一下也行。", second.reply());
+        assertTrue(last(systemPrompts.get("ask")).contains("上一轮已经问过"));
+    }
+
+    /** 需要重新提供时，模型知道原因但被要求不重复；原因本身由代码输出 */
+    @Test
+    void modelAskForCorrectionKeepsErrorReasonInCode() throws Exception {
+        useAskMode(AskMode.MODEL, null);
+        routerScript.add(START_ACTIVITY);
+        extractScript.add("{\"ageMin\":80,\"ageMax\":60}");
+        askScript.add("麻烦再说一下年龄范围，比如60到80岁。");
+        var result = turn("model-fix", "80到60岁", List.of("router", "collect_target"), "collect_target");
+        assertEquals("年龄下限不能大于上限。\n麻烦再说一下年龄范围，比如60到80岁。", result.reply());
+        String prompt = last(systemPrompts.get("ask"));
+        assertTrue(prompt.contains("本轮要问：年龄范围"), prompt);
+        assertTrue(prompt.contains("原因（系统已经告诉用户）：年龄下限不能大于上限"), prompt);
+        assertEquals("请重新提供：年龄范围。", result.state().getTaskStack().get(0).getAwaiting());
+    }
+
     @Test
     void terminalCollectionStageStillEmitsCompletion() throws Exception {
         nodes.set(nodes.indexOf(collectTarget), new CollectTargetNode(support) {
@@ -1078,6 +1181,26 @@ class WorkflowScenarioTest {
                     handler.onCompleteResponse(ChatResponse.builder().aiMessage(AiMessage.from(text)).build());
                     return;
                 }
+                if (sysText.contains("追问模块")) {
+                    String reply = askScript.isEmpty() ? "【模型追问】" : askScript.pop();
+                    switch (reply) {
+                        case "SLOW" -> {
+                            try { Thread.sleep(600); } catch (InterruptedException ignored) { }
+                            handler.onPartialResponse("迟到的追问");
+                            handler.onCompleteResponse(ChatResponse.builder().aiMessage(AiMessage.from("迟到的追问")).build());
+                        }
+                        case "ERROR" -> handler.onError(new RuntimeException("模型不可用"));
+                        case "BREAK" -> {
+                            handler.onPartialResponse("方便说一下");
+                            handler.onError(new RuntimeException("连接中断"));
+                        }
+                        default -> {
+                            handler.onPartialResponse(reply);
+                            handler.onCompleteResponse(ChatResponse.builder().aiMessage(AiMessage.from(reply)).build());
+                        }
+                    }
+                    return;
+                }
                 handler.onPartialResponse("【流式");
                 handler.onPartialResponse("回复】");
                 handler.onCompleteResponse(ChatResponse.builder().aiMessage(AiMessage.from("【流式回复】")).build());
@@ -1108,6 +1231,10 @@ class WorkflowScenarioTest {
         @Override
         public void finishLlmCall(String callId, String responseBodyJson, String responseText, Integer in, Integer out,
                                   Integer total, String finishReason, String status, String err, long ms) {
+            // 追问模型的失败是测试故意制造的（ERROR / BREAK），由节点兜底
+            if (llmCallIds.getOrDefault(callId, "").endsWith("/ask_missing") && !"SUCCESS".equals(status)) {
+                return;
+            }
             assertEquals("SUCCESS", status);
             readTree(responseBodyJson);
         }

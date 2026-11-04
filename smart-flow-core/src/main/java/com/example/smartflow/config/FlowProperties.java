@@ -1,21 +1,51 @@
 package com.example.smartflow.config;
 
+import com.example.smartflow.node.slot.AskMode;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.boot.context.properties.bind.ConstructorBinding;
 
 @ConfigurationProperties(prefix = "flow")
-public record FlowProperties(Model model, Memory memory, Sse sse, Assistant assistant) {
+public record FlowProperties(Model model, Memory memory, Sse sse, Assistant assistant, SlotFilling slotFilling) {
 
     @ConstructorBinding
     public FlowProperties {
         if (assistant == null) {
             assistant = new Assistant(null, null);
         }
+        if (slotFilling == null) {
+            slotFilling = new SlotFilling(null, null, null);
+        }
+    }
+
+    public FlowProperties(Model model, Memory memory, Sse sse, Assistant assistant) {
+        this(model, memory, sse, assistant, null);
     }
 
     /** 不配置助手人设时用默认值（测试里常用） */
     public FlowProperties(Model model, Memory memory, Sse sse) {
         this(model, memory, sse, null);
+    }
+
+    /**
+     * 收集节点（SlotFillingNode）缺信息时的追问方式，对应配置 flow.slot-filling.*。
+     *
+     * @param askMode             model：已记录信息由代码输出，追问由模型措辞，失败时退回代码文案（默认）；
+     *                            code：全部由代码生成，不调用模型
+     * @param firstTokenTimeoutMs 追问模型多久没输出第一个字就放弃、改用代码文案，默认 2000 毫秒
+     * @param maxOutputTokens     追问最多输出多少 token，默认 120（只需要一两句话）
+     */
+    public record SlotFilling(AskMode askMode, Integer firstTokenTimeoutMs, Integer maxOutputTokens) {
+        public SlotFilling {
+            if (askMode == null) {
+                askMode = AskMode.MODEL;
+            }
+            if (firstTokenTimeoutMs == null || firstTokenTimeoutMs <= 0) {
+                firstTokenTimeoutMs = 2000;
+            }
+            if (maxOutputTokens == null || maxOutputTokens <= 0) {
+                maxOutputTokens = 120;
+            }
+        }
     }
 
     /**
@@ -39,6 +69,7 @@ public record FlowProperties(Model model, Memory memory, Sse sse, Assistant assi
     /**
      * @param memoryModel 后台记忆任务（滚动摘要、长期记忆抽取）用的模型，不配置时用 routerModel
      * @param reasoningEffort 思考强度，留空使用供应商默认值；DeepSeek 可用 none 关闭思考以降低延迟
+     * @param askModel 收集节点追问用的流式模型（用户在等，选快的），不配置时用 routerModel
      */
     public record Model(String baseUrl,
                         String apiKey,
@@ -48,7 +79,8 @@ public record FlowProperties(Model model, Memory memory, Sse sse, Assistant assi
                         Integer timeoutSeconds,
                         Boolean logHttp,
                         String memoryModel,
-                        String reasoningEffort) {
+                        String reasoningEffort,
+                        String askModel) {
         /** record 有多个构造器时，必须标明配置绑定用哪个，否则 Spring Boot 不会绑定，整个配置为 null */
         @ConstructorBinding
         public Model {
@@ -61,6 +93,16 @@ public record FlowProperties(Model model, Memory memory, Sse sse, Assistant assi
             if (memoryModel == null || memoryModel.isBlank()) {
                 memoryModel = routerModel;
             }
+            if (askModel == null || askModel.isBlank()) {
+                askModel = routerModel;
+            }
+        }
+
+        public Model(String baseUrl, String apiKey, String chatModel, String routerModel,
+                     Double temperature, Integer timeoutSeconds, Boolean logHttp, String memoryModel,
+                     String reasoningEffort) {
+            this(baseUrl, apiKey, chatModel, routerModel, temperature, timeoutSeconds, logHttp, memoryModel,
+                    reasoningEffort, null);
         }
 
         public Model(String baseUrl, String apiKey, String chatModel, String routerModel,

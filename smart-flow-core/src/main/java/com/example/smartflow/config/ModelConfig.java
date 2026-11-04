@@ -74,7 +74,20 @@ public class ModelConfig {
                 .listeners(List.of(traceListener))
                 .build();
 
-        return new ModelRegistry(chat, router, streaming, memory);
+        // 追问只写一两句话、用户在等：默认用路由模型；和主模型相同时直接复用流式模型
+        StreamingChatModel ask = java.util.Objects.equals(m.askModel(), m.chatModel()) ? streaming : OpenAiStreamingChatModel.builder()
+                .baseUrl(m.baseUrl())
+                .apiKey(apiKey)
+                .modelName(m.askModel())
+                .reasoningEffort(m.reasoningEffort())
+                .temperature(m.temperature())
+                .timeout(timeout)
+                .logRequests(logHttp)
+                .logResponses(logHttp)
+                .listeners(List.of(traceListener))
+                .build();
+
+        return new ModelRegistry(chat, router, streaming, memory, ask);
     }
 
     private static String modelApiKey(FlowProperties.Model model) {

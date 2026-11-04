@@ -17,7 +17,8 @@ public final class SlotErrors {
     /**
      * 拒绝本轮对这些槽位的修改。
      *
-     * @param message 给用户看的原因（会让模型转述），为 null 时只拒绝不提示（例如同组的另一个值已经报过错）
+     * @param message 给用户看的原因，由代码原样输出（多条用分号连接，末尾统一加句号，所以这里不要带句末标点）；
+     *                为 null 时只拒绝不提示（例如同组的另一个值已经报过错）
      */
     public void reject(String message, String... slots) {
         if (message != null && !message.isBlank() && !messages.contains(message)) {

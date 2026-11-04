@@ -6,6 +6,7 @@ import com.example.smartflow.flow.FlowNames;
 import com.example.smartflow.flow.FlowState;
 import com.example.smartflow.flow.HistoryMessage;
 import com.example.smartflow.flow.TaskFrame;
+import com.example.smartflow.llm.NodeModelClient;
 import com.example.smartflow.node.route.RouteSpec;
 import com.example.smartflow.tool.FlowTool;
 import com.example.smartflow.tool.ToolDescriptions;
@@ -13,12 +14,14 @@ import dev.langchain4j.data.message.ChatMessage;
 import dev.langchain4j.data.message.SystemMessage;
 import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.chat.ChatRequestOptions;
+import dev.langchain4j.model.chat.StreamingChatModel;
 import dev.langchain4j.model.chat.request.ChatRequest;
 import dev.langchain4j.model.chat.response.ChatResponse;
 import org.bsc.langgraph4j.action.NodeAction;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -176,6 +179,22 @@ public abstract class AbstractNode implements NodeAction<FlowState> {
      */
     protected String streamReply(NodeScope scope, String purpose, List<ChatMessage> messages) throws Exception {
         return support.modelClient().streamReply(scope, messages, traceOptions(scope, purpose, true, null));
+    }
+
+    /**
+     * 有兜底的流式生成：第一个字在 firstTokenTimeout 内没到、出错或没有输出时，返回值告诉调用方改用固定文案。
+     * text 里已有内容时（例如代码先输出的事实部分），模型输出另起一行接在后面。见 {@link NodeModelClient#streamGuarded}。
+     */
+    protected NodeModelClient.GuardedStream streamGuarded(NodeScope scope, String purpose, StreamingChatModel model,
+                                                          ChatRequest request, StringBuilder text,
+                                                          Duration firstTokenTimeout) {
+        return support.modelClient().streamGuarded(scope, model, request,
+                traceOptions(scope, purpose, true, null), text, firstTokenTimeout);
+    }
+
+    /** 往同一段回复里追加固定文本：text 为空时开始一段新回复，否则另起一行。用于和 {@link #streamGuarded} 拼接 */
+    protected static void appendText(NodeScope scope, StringBuilder text, String s) {
+        NodeModelClient.appendRoundText(scope, text, s);
     }
 
     /** 不经过模型的固定回复（例如确认文案、校验提示），同样以 token 事件推给前端 */
