@@ -22,7 +22,7 @@ import java.util.Map;
  * <ol>
  *   <li>模型抽取：只抽取用户本轮明确说到的信息（抽取提示词由 {@link #slots()} 生成）</li>
  *   <li>代码校验并合并：类型、范围、可选值、跨字段规则都由代码判断，模型不参与</li>
- *   <li>收齐了就推进到 {@link #nextNode()} 并在本轮内直接执行它；没收齐就流式追问还缺的信息</li>
+ *   <li>收齐了就推进到 {@link #nextNode()} 并在本轮内直接执行它；没收齐就由代码生成追问，通过 SSE 输出</li>
  * </ol>
  *
  * 最小实现：
@@ -64,20 +64,6 @@ public abstract class SlotFillingNode extends AbstractNode {
             %s
             """;
 
-    private static final String ASK_PROMPT = """
-            你是"%s"，%s。
-            %s当前步骤：%s。
-
-            已收集：%s
-            本轮前面步骤已保存、尚未向用户回复的信息：%s
-            还缺少：%s
-            %s
-            请用一到两句话回复用户：将前面步骤与本步骤本轮新保存的信息合并成一次简短确认，然后自然地追问还缺少的信息。
-            没有新信息时直接追问；不要按步骤分别确认或重复说“好的”，不要提到内部步骤流转。
-            只能确认上面列出的实际保存信息。用户要求修改但还没提供有效新值时，必须追问新内容，不能说已修改成功。
-            语气亲切简洁，不要编造用户没说过的信息，不要提到"槽位""字段"这类技术词。
-            """;
-
     protected SlotFillingNode(NodeSupport support) {
         super(support);
     }
@@ -103,11 +89,16 @@ public abstract class SlotFillingNode extends AbstractNode {
         return nextNode();
     }
 
+    /** 合并阶段后接替的旧节点 ID，用于让旧任务的修改请求仍能找到字段归属。 */
+    public List<String> previousStageIds() {
+        return List.of();
+    }
+
     public final List<SlotSpec> editableSlots() {
         return slots().stream().filter(s -> !s.extractOnly()).toList();
     }
 
-    /** 用户正在办的事的背景，写进抽取和追问提示词，例如"用户正在创建一个民生活动。"，可以为空 */
+    /** 用户正在办的事的背景，写进抽取提示词，例如"用户正在创建一个民生活动。"，可以为空 */
     protected String taskContext() {
         return "";
     }
@@ -174,7 +165,7 @@ public abstract class SlotFillingNode extends AbstractNode {
         return stageGoal();
     }
 
-    /** 抽取和追问只需要最近几轮；带上长期记忆（例如用户常住的社区），可以帮用户提建议 */
+    /** 抽取只需要最近几轮，用来理解用户对上一句追问的简短回答 */
     @Override
     public HistoryPolicy historyPolicy() {
         return super.historyPolicy().withMaxMessages(6);
@@ -184,10 +175,7 @@ public abstract class SlotFillingNode extends AbstractNode {
     public Map<String, String> promptPreview() {
         Map<String, String> prompts = new LinkedHashMap<>();
         prompts.put("extract_slots · system", extractPrompt());
-        prompts.put("ask_missing · system", ASK_PROMPT.formatted(
-                support.assistant().name(), support.assistant().persona(), contextLine(), stageGoal(),
-                "{已收集信息}（本轮有/没有新收集到的信息）", "{本轮前面步骤已保存的信息，没有则为无}",
-                "{还缺少的信息}", "{校验错误，没有则为空}\n"));
+        prompts.put("ask_missing · code", "由代码根据校验错误、待修改项和缺失必填项生成，每轮最多追问两项；只展示实际保存的信息，不调用模型。");
         return prompts;
     }
 
@@ -211,8 +199,8 @@ public abstract class SlotFillingNode extends AbstractNode {
         // 3. 推进或追问
         List<String> missing = new ArrayList<>(missing(task.getSlots()));
         for (SlotSpec spec : editableSlots()) {
-            if (task.getEditingSlots().contains(spec.name()) && !missing.contains(spec.name())) {
-                missing.add(spec.name());
+            if (task.getEditingSlots().contains(spec.name()) && !missing.contains(spec.askLabel())) {
+                missing.add(spec.askLabel());
             }
         }
         Map<String, Object> updates = updates();
@@ -272,31 +260,28 @@ public abstract class SlotFillingNode extends AbstractNode {
     // ------------------------------------------------------------------ 追问
 
     private String ask(FlowState state, NodeScope scope, TaskFrame task,
-                       List<String> missing, MergeResult result) throws Exception {
-        List<String> errors = result.errors().messages();
-        String errorLine = errors.isEmpty() ? ""
-                : "用户本轮提供的信息有问题，需要请用户重新确认：" + String.join("；", errors) + "\n";
-        List<String> editing = editableSlots().stream().filter(s -> task.getEditingSlots().contains(s.name()))
-                .map(SlotSpec::label).toList();
-        if (!editing.isEmpty()) {
-            errorLine += "用户要求修改但尚未收到有效新内容：" + String.join("、", editing) + "。原值暂时保留，请追问新内容。\n";
-        }
-        String newInfoLine = result.changed() ? "（本轮有新收集到的信息）" : "（本轮没有收集到新信息）";
-        String previousInfo = state.collectedStageInfo().stream()
+                       List<String> missing, MergeResult result) {
+        List<String> parts = new ArrayList<>();
+        List<String> saved = new ArrayList<>(state.collectedStageInfo().stream()
                 .filter(info -> info.taskId().equals(task.getTaskId()) && !info.nodeId().equals(id()))
-                .map(FlowState.CollectedStageInfo::description)
-                .collect(java.util.stream.Collectors.joining("；"));
-        String sys = ASK_PROMPT.formatted(
-                support.assistant().name(), support.assistant().persona(), contextLine(), stageGoal(),
-                describe(task.getSlots()) + " " + newInfoLine,
-                previousInfo.isBlank() ? "（无）" : previousInfo,
-                missing.isEmpty() ? "（无）" : String.join("、", Slots.missingWithHints(slots(), missing)),
-                errorLine);
+                .map(FlowState.CollectedStageInfo::description).toList());
+        if (result.changed()) saved.add(describe(task.getSlots()));
+        if (!saved.isEmpty()) parts.add("当前已记录：" + String.join("；", saved) + "。");
+        if (!result.errors().messages().isEmpty()) {
+            parts.add(String.join("；", result.errors().messages()) + "。");
+        }
 
-        List<ChatMessage> messages = new ArrayList<>();
-        messages.add(system(sys + memoryBlock(state)));
-        messages.addAll(historyMessages(state));
-        messages.add(UserMessage.from(state.userInput()));
-        return streamReply(scope, "ask_missing", messages);
+        // 优先纠正无效值和完成用户要求的修改，再补齐缺失项。所有问题均来自声明的槽位。
+        List<String> corrections = editableSlots().stream()
+                .filter(s -> task.getEditingSlots().contains(s.name()) || result.errors().isRejected(s.name()))
+                .map(SlotSpec::askLabel).distinct().toList();
+        List<String> questions = corrections.isEmpty() ? missing : corrections;
+        String question = (corrections.isEmpty() ? "请补充：" : "请重新提供：")
+                + String.join("、", Slots.missingWithHints(slots(), questions.stream().distinct().limit(2).toList())) + "。";
+        // 跨字段校验也可能只给错误说明而未指定字段，此时让用户根据上面的错误重新提供内容。
+        if (questions.isEmpty()) question = "请根据上述提示重新提供信息。";
+        task.setAwaiting(question);
+        parts.add(question);
+        return emitText(scope, String.join("\n", parts));
     }
 }

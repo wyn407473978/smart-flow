@@ -108,7 +108,7 @@ flowchart TB
 | `taskEntry` | 多轮任务入口；进入时创建或恢复任务 | `CollectTargetNode` |
 | `fallback` | 当前父路由的兜底能力 | `ChatNode` |
 
-任务中间阶段通常不声明 `routeSpec()`。它们仍是图节点，但不会成为根路由可直接选择的意图，例如 `choose_template` 和 `submit_activity`。
+任务中间阶段通常不声明 `routeSpec()`。它们仍是图节点，但不会成为根路由可直接选择的意图，例如 `submit_activity`；`choose_template` 仅为旧会话保留兼容入口。
 
 新增业务节点后，路由提示词中的能力清单来自它的声明，无需手工修改根路由的提示词和图中的分支列表。这个发现过程发生在容器启动和目录快照构建时，不代表可以任意在线上传 Java 类。
 
@@ -148,9 +148,9 @@ flowchart TB
 
 ```java
 TaskStackEdit edit = editTasks(state);
-edit.advanceTo("choose_template");    // 记录任务当前阶段，并清除旧 awaiting
+edit.advanceTo("submit_activity");    // 记录任务当前阶段，并清除旧 awaiting
 edit.writeTo(updates);                // 将复制后修改的任务栈写回
-goTo(updates, "choose_template");    // 本轮立即执行下一阶段
+goTo(updates, "submit_activity");    // 本轮立即执行下一阶段
 ```
 
 只修改 `currentNode` 不会让本轮自动跳转；只修改 `nextNode` 又无法正确记录下轮的恢复位置。通用阶段节点负责配套完成这两步。
@@ -227,17 +227,15 @@ sequenceDiagram
 flowchart TD
     S([START]) --> R[router]
     R -->|"选择一次性能力"| B[biz_query / chat]
-    R -->|"新任务或继续 C1"| C1[collect_target]
-    R -->|"继续 C2"| C2[choose_template]
-    R -->|"继续 C3"| C3[submit_activity]
-    C1 -->|"收齐：写 nextNode"| C2
-    C2 -->|"收齐：写 nextNode"| C3
-    C3 -->|"修改：回到 C1"| C1
-    B --> E([END])
-    C1 -->|"缺信息：追问"| E
-    C2 -->|"缺信息：追问"| E
-    C3 -->|"待确认、完成或失败待重试"| E
-    R -->|"取消：结束本轮"| E
+    R -->|"新任务或继续收集"| C[collect_target]
+    R -->|"继续旧阶段"| L[choose_template：兼容入口]
+    L --> C
+    R -->|"继续确认"| F[submit_activity]
+    C -->|"收齐：写 nextNode"| F
+    F -->|"修改"| C
+    B --> E([END_TURN])
+    C -->|"缺信息：代码追问"| E
+    F -->|"待确认、完成或失败待重试"| E
 ```
 
 图展示的是可能的业务路径。实际运行中，这些箭头都通过相同的 `nextNode` 条件边实现。目标 ID 不存在时会报错。
@@ -297,20 +295,24 @@ flowchart TD
 
 模型只抽取本轮明确提及的信息，代码控制合并：普通 `null` 表示没有提供新值，保留原值；显式清空使用 `Slots.CLEAR`；类型或业务校验失败的字段不会覆盖旧值。
 
-`CollectTargetNode` 声明年龄、性别、区域；年龄上下限属于“年龄范围”必填组，提供任意一端即可满足这一组。它还定义“年龄不限”的换算、单边年龄范围替换，以及上下限联合校验。
+`CollectTargetNode` 统一声明六个保存字段：年龄下限、年龄上限、性别、区域、活动模版和活动时间。
+年龄上下限属于“年龄范围”必填组，提供任意一端即可；`ageUnlimited` 仅用于抽取和换算，不保存。
+它还负责年龄不限换算、单边年龄范围替换和上下限联合校验。
 
-`ChooseTemplateNode` 声明活动模版和时间。两个节点共享同一任务的 `slots`，因此后续确认节点能直接读取所有阶段的数据。
+同一轮输入只抽取一次全部活动字段，所以即使年龄和性别还没提供，用户先说的模版、时间也能立即保存。
+收齐后直接进入 `submit_activity`。`ChooseTemplateNode` 不再收集信息，只把旧会话转到统一收集节点。
+`previousStageIds()` 声明接替的旧阶段，路由目录据此识别旧任务的可修改字段，不需要修改数据库记录。
 
-同一轮推进时，下一阶段收到的仍是原来的 `userInput`。因此用户一次提供多个阶段的信息时，C1 和 C2 可以各自抽取属于自己的字段，连续推进到 C3。
+追问由代码生成，不调用语言模型：优先处理校验错误和待修改项，其次询问缺失必填项，按声明顺序每轮最多两项（同组只问一次）。
+枚举选项来自 `SlotSpec`。已记录信息来自校验合并后的 `task.slots`，问题写入 `task.awaiting` 帮助下一轮路由。
+因此不会自行增加人数、名称，也不会在“下周六上午”已保存后强制追问起止时刻。
 
-自动推进的收集节点不发送中间确认文案。它将本轮有变化的阶段信息暂存在 `FlowState.collectedStageInfo`（按任务、节点关联，不写入会话）。
-如果后续阶段缺信息，追问提示词会同时包含前面阶段已保存的信息，由一次流式回复统一确认并追问；
-如果一路进入 `ConfirmNode`，直接展示完整确认清单。`completedText()` 只在没有下一阶段、收齐即完成任务时调用。
-这样不会先向 SSE 推送多段确认，再试图在轮末删除重复文本。
+框架仍支持多个收集阶段。自动推进的节点不发送中间确认，把本轮有变化的信息暂存在 `FlowState.collectedStageInfo`（不写入会话）。
+后续追问由代码合并这些已保存信息；一路进入 `ConfirmNode` 时只展示完整清单。`completedText()` 只在没有下一阶段、收齐即完成任务时调用。
 
-用户在 C2 说“我想修改区域”时，路由将 `region` 加入任务帧的 `editingSlots`，回到 C1。
-即使原区域已经填写，也要等待用户提供有效新值；通过字段和跨字段校验后才替换原值、清除待修改项并推进。
-空值、无效值或抽取失败都会保留旧值和待修改状态。待修改项随会话状态保存，插话后仍能继续；修改完成进入 C3 时会重新展示汇总等待确认。
+用户说“我想修改区域”时，路由把 `region` 加入 `editingSlots`，回到 `collect_target`。
+旧值暂时保留，待有效新值通过校验才替换并清除待修改标记；空值、无效值或抽取失败都继续等待。
+待修改状态跨轮和插话保存，修改完成后重新展示汇总等待确认。
 
 ### 7.2 确认节点与写操作
 
@@ -393,7 +395,7 @@ sequenceDiagram
 ```text
 栈顶  [临时追问] BIZ_QUERY       currentNode=biz_query
                 awaiting=“请问要查哪个城市？”
-      [正式任务] ACTIVITY_CREATE currentNode=choose_template
+      [正式任务] ACTIVITY_CREATE currentNode=collect_target
                 slots=已收集的目标人群和模版
 栈底
 ```
@@ -403,7 +405,7 @@ sequenceDiagram
 | 用户回复 | 预期语义与处理 |
 |---|---|
 | “杭州” | 回答临时追问，回到 `biz_query`，原活动任务保留 |
-| “先继续活动” | 继续正式任务，丢弃临时追问，回到 `choose_template` |
+| “先继续活动” | 继续正式任务，丢弃临时追问，回到 `collect_target` |
 | “给我讲个笑话” | 开始另一话题，旧临时追问作废，正式任务仍保留 |
 | “取消” | 当前规则会清掉临时追问，并取消当前正式任务；只有追问时则只取消追问 |
 
@@ -419,11 +421,11 @@ sequenceDiagram
 
 | 轮次 | 用户输入 | 本轮实际节点路径 | 轮末状态 |
 |---|---|---|---|
-| 1 | “创建一个敬老活动，面向阳光社区 60 岁以上的人，性别不限” | `router → collect_target → choose_template` | C1 收齐；C2 提取敬老模版，缺时间，正式任务停在 C2 |
+| 1 | “创建一个敬老活动，面向阳光社区 60 岁以上的人，性别不限” | `router → collect_target` | 人群和敬老模版已保存，缺时间，停在统一收集节点 |
 | 2 | “天气怎么样？” | `router → biz_query` | 插话；`ask_user` 问城市，栈顶新增临时帧 |
-| 3 | “杭州” | `router → biz_query` | 查天气并回答；临时帧移除，活动任务仍在 C2，追加恢复提示 |
-| 4 | “继续，时间定在下周六上午” | `router → choose_template → submit_activity` | C2 收齐；C3 展示汇总，记录等待确认 |
-| 5 | “区域改成幸福社区” | `router → submit_activity → collect_target → choose_template → submit_activity` | C3 判断为修改；C1 改区域，已有信息仍满足要求，推进回来重新确认 |
+| 3 | “杭州” | `router → biz_query` | 查天气并回答；临时帧移除，活动任务仍在收集节点，追加恢复提示 |
+| 4 | “继续，时间定在下周六上午” | `router → collect_target → submit_activity` | 收齐活动信息，确认节点展示汇总，记录等待确认 |
+| 5 | “区域改成幸福社区” | `router → submit_activity → collect_target → submit_activity` | 确认节点判断为修改；收集节点改区域，已有信息仍满足要求，推进回来重新确认 |
 | 6 | “确认” | `router → submit_activity` | 调用 demo 的创建逻辑，任务标记完成，轮末出栈 |
 
 轮次 2 结束后的会话状态大致如下，ID 为示意值：
@@ -434,7 +436,7 @@ sequenceDiagram
     {
       "taskId": "activity-task-id",
       "taskType": "ACTIVITY_CREATE",
-      "currentNode": "choose_template",
+      "currentNode": "collect_target",
       "status": "ACTIVE",
       "slots": {
         "ageMin": 60,

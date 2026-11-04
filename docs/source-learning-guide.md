@@ -134,17 +134,17 @@ SpringApplication.run(SmartFlowApplication.class, args);
 
 ### 4.3 构造器注入：依赖由 Spring 传入
 
-打开 [ChooseTemplateNode.java](../smart-flow-demo/src/main/java/com/example/smartflow/demo/node/ChooseTemplateNode.java)：
+打开 [CollectTargetNode.java](../smart-flow-demo/src/main/java/com/example/smartflow/demo/node/CollectTargetNode.java)：
 
 ```java
-public ChooseTemplateNode(NodeSupport support) {
+public CollectTargetNode(NodeSupport support) {
     super(support);
 }
 ```
 
 这表示创建节点需要一个 `NodeSupport`。Spring 查找该类型的 Bean，再调用构造器。单一构造器通常不必额外标 `@Autowired`；本项目 `NodeSupport` 有多个构造器，供 Spring 使用的那个明确标了 `@Autowired`。[Spring 构造器注入说明](https://docs.spring.io/spring-framework/reference/core/beans/annotation-config/autowired.html)
 
-`super(support)` 是普通 Java 父类构造器调用。创建一个 `ChooseTemplateNode` 对象时，会初始化它的父类部分；这不意味着 Spring 又独立创建了一个 `SlotFillingNode` 或 `AbstractNode` Bean。
+`super(support)` 是普通 Java 父类构造器调用。创建一个 `CollectTargetNode` 对象时，会初始化它的父类部分；这不意味着 Spring 又独立创建了一个 `SlotFillingNode` 或 `AbstractNode` Bean。
 
 **好处：** 依赖能从构造器直接看见；测试可以自己 `new` 对象并传入替代依赖，不必每次启动 Spring。
 
@@ -163,7 +163,7 @@ public ChooseTemplateNode(NodeSupport support) {
 
 这解释了为什么不能在节点实例字段里随意放 `currentUser`、`currentTask`：节点是共享对象，这些字段会在不同用户间相互覆盖。当前任务数据应随 state、scope 或方法局部变量传递。
 
-**动手确认：** 在 IDE 给 `ChooseTemplateNode` 和 `NodeSupport` 构造器下断点。启动应用时观察调用栈和入参；发送多条消息时，节点构造器不应因此每轮重新执行。
+**动手确认：** 在 IDE 给 `CollectTargetNode` 和 `NodeSupport` 构造器下断点。启动应用时观察调用栈和入参；发送多条消息时，节点构造器不应因此每轮重新执行。
 
 ## 5. Bean 如何变成可执行的工作流图
 
@@ -180,8 +180,8 @@ Spring 对集合依赖的注入会收集匹配类型的 Bean。因此这里能�
 
 有三个不同名字不要混淆：
 
-- Spring Bean 名：用于容器管理，例如默认的 `chooseTemplateNode`。
-- 图节点 ID：`id()` 返回的 `choose_template`。
+- Spring Bean 名：用于容器管理，例如默认的 `collectTargetNode`。
+- 图节点 ID：`id()` 返回的 `collect_target`。
 - 意图编码：例如 `ACTIVITY_CREATE`，表示用户要做哪类事。
 
 一个意图可能包含多个阶段，所以意图编码不等于当前节点 ID。
@@ -239,7 +239,7 @@ flowchart LR
 
 如果能力描述、提示词列表、意图映射分别手写在三个地方，很容易只更新其中一个。现在它们以节点声明为共同来源，所以扩展更容易保持一致。
 
-`ChooseTemplateNode` 没有声明 `routeSpec()`，仍会进入图，因为它是 `AbstractNode` Bean；它只是不作为根路由的新任务入口。这正好表达“活动创建从收集人群开始，选择模版是内部阶段”。
+`SubmitActivityNode` 没有声明 `routeSpec()`，仍会进入图，因为它是 `AbstractNode` Bean；它不作为根路由的新任务入口，而是收集完成后的确认阶段。旧会话兼容节点 `ChooseTemplateNode` 同样会注册到图中，但新任务不经过它。
 
 **自测：** 只有继承 `AbstractNode`，没有注册 Bean，会自动出现吗？不会。只有 `@Component`，但不是节点类型，会进入节点集合吗？不会。
 
@@ -313,14 +313,14 @@ Spring MVC 根据 /api/chat 找到 Controller 方法
 
 | 字段 | 回答的问题 | 举例 |
 |---|---|---|
-| `FlowState.nextNode` | 本轮立即去哪里？ | 收齐目标人群后立即去 `choose_template` |
-| `TaskFrame.currentNode` | 任务目前停在哪，下轮继续去哪里？ | 模版未填完，保存为 `choose_template` |
+| `FlowState.nextNode` | 本轮立即去哪里？ | 收齐全部活动信息后立即去 `submit_activity` |
+| `TaskFrame.currentNode` | 任务目前停在哪，下轮继续去哪里？ | 模版未填完，保存为 `collect_target` |
 
 推进阶段通常要同时做两件事：
 
 ```java
-edit.advanceTo("choose_template"); // 更新任务进度，清除上一阶段等待信息
-goTo(updates, "choose_template");  // 指挥本轮图继续执行
+edit.advanceTo("submit_activity"); // 更新任务进度，清除上一阶段等待信息
+goTo(updates, "submit_activity");  // 指挥本轮图继续执行
 ```
 
 缺少前者，下轮可能回到旧阶段；缺少后者，本轮不会立刻执行新阶段。
@@ -347,7 +347,7 @@ goTo(updates, "choose_template");  // 指挥本轮图继续执行
   → 返回 updates 给图合并
 ```
 
-如果实际对象是 `ChatNode`，调用它的 `execute`；如果是 `ChooseTemplateNode`，它继承 `SlotFillingNode.execute`，该方法再调用它提供的 `slots()`、`nextNode()` 等。
+如果实际对象是 `ChatNode`，调用它的 `execute`；如果是 `CollectTargetNode`，它继承 `SlotFillingNode.execute`，该方法再调用它提供的 `slots()`、`nextNode()` 等。
 
 这就是“模板方法”：父类固定共同步骤，子类填写变化部分。不是 Spring 通过方法名猜测应该执行谁，而是普通 Java 的继承与多态。
 
@@ -361,7 +361,7 @@ goTo(updates, "choose_template");  // 指挥本轮图继续执行
 {
   taskStack: 修改后的任务栈,
   replies: 本节点的回复片段,
-  nextNode: choose_template
+  nextNode: submit_activity
 }
 ```
 
@@ -403,7 +403,10 @@ Map 是状态补丁，只放需要改变的 key。`FlowState.SCHEMA` 为 `REPLIE
 
 ### 11.1 先看业务声明，再看通用实现
 
-打开 [CollectTargetNode](../smart-flow-demo/src/main/java/com/example/smartflow/demo/node/CollectTargetNode.java)、[ChooseTemplateNode](../smart-flow-demo/src/main/java/com/example/smartflow/demo/node/ChooseTemplateNode.java)，再看 [SlotFillingNode](../smart-flow-core/src/main/java/com/example/smartflow/node/slot/SlotFillingNode.java)。
+打开 [CollectTargetNode](../smart-flow-demo/src/main/java/com/example/smartflow/demo/node/CollectTargetNode.java)，再看 [SlotFillingNode](../smart-flow-core/src/main/java/com/example/smartflow/node/slot/SlotFillingNode.java)。
+
+Demo 现在把年龄上下限、性别、区域、模版和时间放在同一个收集节点。用户一句话先说模版和时间，也会立即校验保存，不必等目标人群收齐。
+`ChooseTemplateNode` 只负责旧会话跳转，新任务走 `collect_target → submit_activity`。类名 `CollectTargetNode` 和节点 ID 沿用旧版本。
 
 `SlotSpec` 就是一份字段说明：名字、中文标签、类型、范围、枚举、是否必填、抽取提示等。业务类主要声明这些规则和下一阶段。
 
@@ -420,7 +423,7 @@ Map 是状态补丁，只放需要改变的 key。`FlowState.SCHEMA` 为 `REPLIE
 模型说 `ageMin=90, ageMax=60`，仍需要代码拒绝不合理范围。模型只输出 `null` 通常表示本轮没提供新值，不能顺手清除上一轮有效数据；显式清空由 `Slots.CLEAR` 表达。
 
 自动推进的节点会暂存本轮已保存的信息，不立即说一句“好的，已确认……”。这些信息放在 `FlowState.collectedStageInfo`，只在本轮有效。
-后续节点需要追问时，将前面阶段的信息与本阶段信息交给模型，合并成一次确认和一个问题；如果信息全部收齐，就直接由确认节点展示汇总。
+后续节点需要追问时，由代码合并已保存的信息，按照错误、待修改项和缺失项生成问题，每轮最多两项；信息全部收齐则由确认节点展示汇总。追问不再调用模型，枚举选项也从声明中读取。
 这是为了让一次对话听起来连贯，避免每经过一个节点就重新确认一遍。没有下一阶段、收齐即完成任务的节点仍通过 `completedText()` 输出完成文案。
 
 `applyExtraction()` 把换算和合并暴露为不调模型的方法，因此年龄规则可以单独测试。这是很实用的设计：业务规则的正确性不必依赖网络和模型随机输出。
@@ -457,10 +460,10 @@ Map 是状态补丁，只放需要改变的 key。`FlowState.SCHEMA` 为 `REPLIE
 
 | 轮次 / 用户输入 | 本轮节点路径 | 轮末保留的进度 |
 |---|---|---|
-| 1：“我想办一个活动” | router → collect_target | 当前 C1，字段未齐 |
-| 2：“60 岁以上的女性” | router → collect_target | `ageMin=60, gender=FEMALE`，等待区域 |
-| 3：“阳光社区” | router → collect_target → choose_template | 当前 C2，人群完整，等待模版和时间 |
-| 4：“健康讲座，下周六上午” | router → choose_template → submit_activity | 当前 C3，展示汇总，等待确认 |
+| 1：“我想办一个活动” | router → collect_target | 当前收集节点，字段未齐 |
+| 2：“60 岁以上的女性” | router → collect_target | `ageMin=60, gender=FEMALE`，继续询问区域和模版 |
+| 3：“阳光社区” | router → collect_target | 仍在收集节点，人群完整，等待模版和时间 |
+| 4：“健康讲座，下周六上午” | router → collect_target → submit_activity | 当前确认节点，展示汇总，等待确认 |
 | 5：“确认” | router → submit_activity | 提交成功，轮末移除完成任务 |
 
 第三轮结束后的任务片段：
@@ -468,7 +471,7 @@ Map 是状态补丁，只放需要改变的 key。`FlowState.SCHEMA` 为 `REPLIE
 ```json
 {
   "taskType":"ACTIVITY_CREATE",
-  "currentNode":"choose_template",
+  "currentNode":"collect_target",
   "slots":{"ageMin":60,"gender":"FEMALE","region":"阳光社区"},
   "status":"ACTIVE",
   "ephemeral":false
@@ -479,12 +482,12 @@ Map 是状态补丁，只放需要改变的 key。`FlowState.SCHEMA` 为 `REPLIE
 
 ### 12.1 在第三轮之后插话会怎样
 
-用户问天气时，可能走 `router → biz_query`。正式活动任务仍停在 C2。查询完成后，引擎可以提醒继续活动。
+用户问天气时，可能走 `router → biz_query`。正式活动任务仍停在收集节点。查询完成后，引擎可以提醒继续活动。
 
 如果查询缺少城市，模型调用 `ask_user`，任务栈会变成示意结构：
 
 ```text
-栈底：活动任务，currentNode=choose_template，ephemeral=false
+栈底：活动任务，currentNode=collect_target，ephemeral=false
 栈顶：查询追问，currentNode=biz_query，ephemeral=true，awaiting=要查询哪个城市？
 ```
 
@@ -629,7 +632,7 @@ Langfuse 是额外的观测集成，进一步阅读 [docs/langfuse.md](langfuse.
 4. `GraphConfig.build` 中条件边的 lambda：查看本次 `state.nextNode()`。
 5. 引擎 `sessions.save` 前：查看最终保留的任务栈。
 
-预期：前几轮停在 `collect_target`；补上“阳光社区”那一轮会进入 `choose_template`。插话不会丢失正式任务。测试还故意提供一次非法路由 JSON，观察纠错重试。
+预期：前几轮停在 `collect_target`；补上“阳光社区”后仍在统一收集节点等待模版和时间。插话不会丢失正式任务。测试还故意提供一次非法路由 JSON，观察纠错重试。
 
 记录：每轮的输入、节点路径、`currentNode`、`slots`、`awaiting`。能自己解释这些值为什么变化，才算跟懂。
 

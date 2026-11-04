@@ -40,7 +40,7 @@ class CollectTargetNodeTest {
         assertTrue(r.errors().isEmpty());
         assertEquals(60, slots.get(CollectTargetNode.SLOT_AGE_MIN));
         assertEquals("FEMALE", slots.get(CollectTargetNode.SLOT_GENDER));
-        assertTrue(node.missing(slots).isEmpty());
+        assertEquals(List.of("活动模版", "活动时间"), node.missing(slots));
         assertEquals("60 岁及以上、女性、阳光社区", node.describe(slots));
     }
 
@@ -93,7 +93,7 @@ class CollectTargetNodeTest {
         MergeResult r = node.applyExtraction(slots, extracted(null, null, null, null, null));
 
         assertFalse(r.changed());
-        assertEquals(List.of("年龄范围", "目标区域或社区"), node.missing(slots));
+        assertEquals(List.of("年龄范围", "目标区域或社区", "活动模版", "活动时间"), node.missing(slots));
     }
 
     @Test

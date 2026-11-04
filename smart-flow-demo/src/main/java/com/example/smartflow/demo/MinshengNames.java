@@ -13,11 +13,11 @@ public final class MinshengNames {
     public static final String BIZ_QUERY = "biz_query";
     /** B3：自由对话，根路由的兜底节点 */
     public static final String CHAT = "chat";
-    /** C1：活动创建 - 收集目标人群 */
+    /** 活动创建 - 统一收集活动信息（沿用旧 ID） */
     public static final String COLLECT_TARGET = "collect_target";
-    /** C2：活动创建 - 确认活动模版和时间 */
+    /** 旧会话兼容入口，新任务不经过此节点 */
     public static final String CHOOSE_TEMPLATE = "choose_template";
-    /** C3：活动创建 - 确认后创建活动 */
+    /** 活动创建 - 确认后创建活动 */
     public static final String SUBMIT_ACTIVITY = "submit_activity";
 
     // ---- 任务类型 ----

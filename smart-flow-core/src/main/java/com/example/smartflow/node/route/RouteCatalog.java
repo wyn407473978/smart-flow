@@ -106,7 +106,8 @@ public class RouteCatalog {
             if (node instanceof SlotFillingNode stage) {
                 stages.add(stage);
             }
-            if (nodeId.equals(task.getCurrentNode())) {
+            if (nodeId.equals(task.getCurrentNode())
+                    || node instanceof SlotFillingNode stage && stage.previousStageIds().contains(task.getCurrentNode())) {
                 return List.copyOf(stages);
             }
             nodeId = node instanceof SlotFillingNode stage ? stage.nextStage() : null;

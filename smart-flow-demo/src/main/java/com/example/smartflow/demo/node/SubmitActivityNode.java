@@ -10,7 +10,7 @@ import java.util.Locale;
 import java.util.Map;
 
 /**
- * C3：活动创建 - 确认后创建活动。任务的最后一个阶段。
+ * 活动创建 - 确认后创建活动。任务的最后一个阶段。
  * <p>
  * 演示用：{@link #commit} 没有真正调用业务系统，只用幂等键生成一个固定的活动编号。
  * 接真实接口时，把幂等键作为请求号传给业务系统（或者存进业务表的唯一索引），重复确认不会创建两个活动。
@@ -19,12 +19,10 @@ import java.util.Map;
 public class SubmitActivityNode extends ConfirmNode {
 
     private final CollectTargetNode collectTarget;
-    private final ChooseTemplateNode chooseTemplate;
 
-    public SubmitActivityNode(NodeSupport support, CollectTargetNode collectTarget, ChooseTemplateNode chooseTemplate) {
+    public SubmitActivityNode(NodeSupport support, CollectTargetNode collectTarget) {
         super(support);
         this.collectTarget = collectTarget;
-        this.chooseTemplate = chooseTemplate;
     }
 
     @Override
@@ -40,9 +38,9 @@ public class SubmitActivityNode extends ConfirmNode {
     @Override
     protected String summary(TaskFrame task) {
         Map<String, Object> slots = task.getSlots();
-        return "- 目标人群：" + collectTarget.describe(slots) + "\n"
-                + "- 活动模版：" + chooseTemplate.templateName(slots) + "\n"
-                + "- 活动时间：" + slots.getOrDefault(ChooseTemplateNode.SLOT_TIME, "（未填写）");
+        return "- 目标人群：" + collectTarget.targetDescription(slots) + "\n"
+                + "- 活动模版：" + collectTarget.templateName(slots) + "\n"
+                + "- 活动时间：" + slots.getOrDefault(CollectTargetNode.SLOT_TIME, "（未填写）");
     }
 
     @Override
@@ -53,7 +51,7 @@ public class SubmitActivityNode extends ConfirmNode {
         return CommitResult.ok("活动已创建成功，编号 " + activityId + "。后续可以在活动管理里查看和发布。");
     }
 
-    /** 修改时从 C1 开始：C1、C2 收齐后会自动往后走，最后回到这里重新确认 */
+    /** 修改时回到统一收集节点，收齐后重新确认 */
     @Override
     protected String editNode(TaskFrame task) {
         return MinshengNames.COLLECT_TARGET;

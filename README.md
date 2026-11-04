@@ -29,9 +29,13 @@ core 和 web 都是 Spring Boot 自动配置（`FlowCoreAutoConfiguration`、`Fl
 | A 路由 | `router` | ROUTER | 每轮必经。提示词由子节点的路由声明自动拼成；模型判断 action + intent + 待修改字段，去向和任务栈变化由代码决定 |
 | B2 业务查询 | `biz_query` | TOOL_AGENT | 挂载 `get_weather`（查天气，演示数据）、`get_user_info`（查本人信息：rise / 27 岁）；手写 tool loop，流式输出 |
 | B3 闲聊 | `chat` | CHAT | 流式回复；根路由的兜底节点 |
-| C1 目标人群 | `collect_target` | SLOT_FILLING | 活动创建任务的入口。`SlotFillingNode`：年龄范围 / 性别 / 区域，收齐则同一轮进入 C2，否则流式追问 |
-| C2 模版和时间 | `choose_template` | SLOT_FILLING | `SlotFillingNode`：活动模版（4 选 1）、活动时间，收齐则同一轮进入 C3 |
-| C3 确认创建 | `submit_activity` | CONFIRM | `ConfirmNode`：展示汇总请用户确认 → 创建活动（带幂等键）；要修改时回到 C1 |
+| 活动信息收集 | `collect_target` | SLOT_FILLING | 统一抽取年龄上下限、性别、区域、模版、时间；代码校验、合并并追问缺失项，收齐直接进入确认 |
+| 旧阶段兼容 | `choose_template` | COMPATIBILITY | 仅为旧会话保留，携带原任务数据转到 `collect_target`；新任务不经过这里 |
+| 确认创建 | `submit_activity` | CONFIRM | 从已保存数据展示汇总，确认后创建（带幂等键）；修改时回到 `collect_target` |
+
+追问由代码按声明字段生成：优先处理校验错误和待修改项，每轮最多问两项，再补缺失的必填项。
+模版和时间可以在第一句话就保存；“下周六上午”已满足当前时间字段，不额外要求具体起止时刻。
+人数和活动名称未在 Demo 中声明，不会被追问或保存。仍通过 SSE 输出文字，但不再调用 `ask_missing` 模型。
 
 支持的对话行为：开始任务、多轮补充、修改已填信息、任务中插话（回答后提示继续）、确认前修改、取消任务、路由输出异常兜底。
 
@@ -141,10 +145,10 @@ public class ComplaintNode extends AbstractNode {
 | 工厂方法 | 含义 | 例子 |
 |---|---|---|
 | `oneShot` | 一次性节点，回答完就结束；任务进行中被路由到算插话，回答后提示继续任务 | 业务查询、投诉 |
-| `taskEntry` | 多轮任务的入口，路由到这里会开启任务并压栈 | 活动创建（C1） |
+| `taskEntry` | 多轮任务的入口，路由到这里会开启任务并压栈 | 活动创建（`collect_target`） |
 | `fallback` | 兜底，意图不认识或模型输出异常时去这里，每个路由节点有且只有一个 | 闲聊 |
 
-任务内部的后续阶段（C2、C3）不声明 `routeSpec`，它们只能由上一阶段推进过来。框架提供了两种现成的任务阶段节点，一般不用自己处理任务栈：
+任务内部的确认阶段不声明 `routeSpec`，由收集节点推进过去；旧阶段兼容节点也不挂在路由选项中。框架提供了两种现成的任务阶段节点，一般不用自己处理任务栈：
 
 | 基类 | 用途 | 子类要写的 |
 |---|---|---|
@@ -157,7 +161,7 @@ public class ComplaintNode extends AbstractNode {
 `SlotFillingNode` 默认用 `stageGoal()`，`ConfirmNode` 默认是"等用户确认"。
 
 任务进入后续阶段后仍可修改前面阶段的信息：路由根据 `editSlots` 回到字段所属的收集节点。
-例如 C2 中说“我想修改区域”，会回到 C1 追问新区域；旧区域暂时保留，待用户提供的新值通过校验后才替换，随后继续 C2。
+例如确认时说“我想修改区域”，会回到 `collect_target` 追问新区域；旧区域暂时保留，新值通过校验后才替换，收齐后重新确认。
 待修改字段保存在任务帧的 `editingSlots` 中，跨轮、插话后仍会保留；不会因为旧值已经填过而跳过修改。
 
 自动完成的事情：
@@ -277,7 +281,7 @@ mvn test
 - `SlotsTest`、`TaskStackEditTest`、`ConfirmNodeTest`（core）：槽位转换 / 校验 / 合并、任务栈操作、确认词判定
 - `CollectTargetNodeTest`（demo）：业务槽位规则（年龄不限、范围替换、下限不能大于上限）
 - `WorkflowScenarioTest`（demo）：多轮场景测试，用按脚本返回的 stub 模型 + 内存存储，不需要数据库和真实模型。
-  覆盖开始任务、补充、插话、非法 JSON 重试、C1→C2→C3 同轮流转、确认后创建、确认前修改、写操作失败重试、取消、路由兜底
+  覆盖开始任务、补充、插话、非法 JSON 重试、统一收集→确认同轮流转、提前提供模版和时间、禁止额外字段追问、旧会话兼容、确认后创建、确认前修改、写操作失败重试、取消、路由兜底
 
 这两类测试就是后续 Evals 的起点：场景脚本保留，把 stub 换成真实模型 + LLM 扮演用户，就是端到端评测。
 

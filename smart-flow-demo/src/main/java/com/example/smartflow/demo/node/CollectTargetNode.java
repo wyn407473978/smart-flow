@@ -16,7 +16,8 @@ import java.util.Map;
 import java.util.Optional;
 
 /**
- * C1：活动创建 - 收集目标人群（年龄、性别、区域）。活动创建任务的入口。
+ * 活动创建的信息收集入口：统一收集年龄、性别、区域、模版和时间。
+ * 类名和 collect_target ID 沿用旧版本，避免已有任务入口失效。
  * <p>
  * 基于 {@link SlotFillingNode}：只声明槽位，抽取 / 校验 / 追问 / 推进由基类完成。
  * 定制了两处：
@@ -32,6 +33,8 @@ public class CollectTargetNode extends SlotFillingNode {
     public static final String SLOT_AGE_MAX = "ageMax";
     public static final String SLOT_GENDER = "gender";
     public static final String SLOT_REGION = "region";
+    public static final String SLOT_TEMPLATE = "template";
+    public static final String SLOT_TIME = "activityTime";
     /** 只抽取不保存：用户明确说年龄不限 */
     private static final String AGE_UNLIMITED = "ageUnlimited";
 
@@ -47,7 +50,15 @@ public class CollectTargetNode extends SlotFillingNode {
             SlotSpec.bool(AGE_UNLIMITED, "年龄不限").describe("用户明确说年龄不限时为 true，否则为 null").extractOnly().build(),
             SlotSpec.enumOf(SLOT_GENDER, "性别")
                     .option("MALE", "男性").option("FEMALE", "女性").option("ALL", "不限性别").build(),
-            SlotSpec.string(SLOT_REGION, "目标区域或社区").maxLength(50).describe("保留用户原话").build());
+            SlotSpec.string(SLOT_REGION, "目标区域或社区").maxLength(50).describe("保留用户原话").build(),
+            SlotSpec.enumOf(SLOT_TEMPLATE, "活动模版")
+                    .option("ELDERLY_CARE", "敬老关爱").option("PARENT_CHILD", "亲子活动")
+                    .option("HEALTH_TALK", "健康讲座").option("CULTURE_SPORTS", "文体活动")
+                    .describe("根据用户明确说出的活动类型选择，例如亲子活动 → PARENT_CHILD")
+                    .build(),
+            SlotSpec.string(SLOT_TIME, "活动时间").maxLength(50)
+                    .describe("保留用户原话，例如下周六上午；已有时间描述即可，不要求补充具体起止时刻")
+                    .build());
 
     public CollectTargetNode(NodeSupport support) {
         super(support);
@@ -79,12 +90,17 @@ public class CollectTargetNode extends SlotFillingNode {
 
     @Override
     protected String stageGoal() {
-        return "收集活动的目标人群（年龄范围、性别、目标区域或社区）";
+        return "收集活动信息（年龄范围、性别、目标区域或社区、活动模版、活动时间）";
     }
 
     @Override
     protected String nextNode() {
-        return MinshengNames.CHOOSE_TEMPLATE;
+        return MinshengNames.SUBMIT_ACTIVITY;
+    }
+
+    @Override
+    public List<String> previousStageIds() {
+        return List.of(MinshengNames.CHOOSE_TEMPLATE);
     }
 
     // ------------------------------------------------------------------ 定制
@@ -115,8 +131,7 @@ public class CollectTargetNode extends SlotFillingNode {
     }
 
     /** 例如"60 岁及以上、女性、阳光社区" */
-    @Override
-    public String describe(Map<String, Object> slots) {
+    public String targetDescription(Map<String, Object> slots) {
         List<String> parts = new ArrayList<>();
         Object min = slots.get(SLOT_AGE_MIN);
         Object max = slots.get(SLOT_AGE_MAX);
@@ -147,7 +162,17 @@ public class CollectTargetNode extends SlotFillingNode {
     }
 
     @Override
-    protected String completedText(Map<String, Object> slots) {
-        return "好的，活动的目标人群确认为：" + describe(slots) + "。";
+    public String describe(Map<String, Object> slots) {
+        List<String> parts = new ArrayList<>();
+        String target = targetDescription(slots);
+        if (!"（暂无）".equals(target)) parts.add(target);
+        if (slots.containsKey(SLOT_TEMPLATE)) parts.add("活动模版：" + templateName(slots));
+        if (slots.containsKey(SLOT_TIME)) parts.add("活动时间：" + slots.get(SLOT_TIME));
+        return parts.isEmpty() ? "（暂无）" : String.join("；", parts);
+    }
+
+    public String templateName(Map<String, Object> slots) {
+        SlotSpec template = SLOTS.stream().filter(s -> s.name().equals(SLOT_TEMPLATE)).findFirst().orElseThrow();
+        return Slots.display(template, slots.get(SLOT_TEMPLATE));
     }
 }

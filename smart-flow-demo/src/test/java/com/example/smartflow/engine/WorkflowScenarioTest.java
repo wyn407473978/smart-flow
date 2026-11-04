@@ -27,6 +27,8 @@ import com.example.smartflow.node.confirm.ConfirmNode.CommitResult;
 import com.example.smartflow.node.RouterNode;
 import com.example.smartflow.node.route.RouteCatalog;
 import com.example.smartflow.node.route.RouteSpec;
+import com.example.smartflow.node.slot.SlotFillingNode;
+import com.example.smartflow.node.slot.SlotSpec;
 import com.example.smartflow.session.SessionRepository;
 import com.example.smartflow.session.SessionState;
 import com.example.smartflow.demo.tool.UserInfoTool;
@@ -78,7 +80,6 @@ class WorkflowScenarioTest {
     private final Deque<String> extractScript = new ArrayDeque<>();
     /** 确认节点判断用户回复的模型输出脚本 */
     private final Deque<String> confirmScript = new ArrayDeque<>();
-    private final Deque<String> askReplyScript = new ArrayDeque<>();
     private final List<String> llmCalls = new ArrayList<>();
     private final FakeSessions sessions = new FakeSessions();
     private final FakeMemoryRepository memoryRepo = new FakeMemoryRepository();
@@ -132,7 +133,7 @@ class WorkflowScenarioTest {
         collectTarget = new CollectTargetNode(support);
         chooseTemplate = new ChooseTemplateNode(support);
         nodes.addAll(List.of(new RouterNode(support, catalog), new ChatNode(support, catalog),
-                collectTarget, chooseTemplate, new SubmitActivityNode(support, collectTarget, chooseTemplate),
+                collectTarget, chooseTemplate, new SubmitActivityNode(support, collectTarget),
                 new BizQueryNode(support, catalog, new WeatherTool(MAPPER), new UserInfoTool(MAPPER))));
         catalog.refresh();
         rebuild();
@@ -544,14 +545,13 @@ class WorkflowScenarioTest {
         var digress = turn("s1", "今天天气怎么样", List.of("router", "chat"), "collect_target");
         assertTrue(digress.reply().endsWith("要继续吗？"), "插话后应提示继续任务");
 
-        // 路由第一次输出非法 JSON，自动纠错重试；槽位收齐后同一轮进入 C2
+        // 路由第一次输出非法 JSON，自动纠错重试；继续补充活动信息
         routerScript.add("not json");
         routerScript.add("{\"action\":\"CONTINUE\",\"intent\":\"ACTIVITY_CREATE\",\"reason\":\"补充区域\"}");
         extractScript.add("{\"region\":\"阳光社区\"}");
-        extractScript.add("{}");   // 同一轮进入 C2，C2 从这句话里没抽到模版和时间，追问
-        var done = turn("s1", "阳光社区", List.of("router", "collect_target", "choose_template"), "choose_template");
-        assertEquals("【流式回复】", done.reply(), "自动推进节点不先发送确认文案");
-        assertTrue(last(systemPrompts.get("ask")).contains("60 岁及以上、女性、阳光社区"));
+        var done = turn("s1", "阳光社区", List.of("router", "collect_target"), "collect_target");
+        assertTrue(done.reply().contains("当前已记录：60 岁及以上、女性、阳光社区"));
+        assertTrue(done.reply().contains("请补充：活动模版"));
         assertEquals(60, done.state().getTaskStack().get(0).getSlots().get("ageMin"));
         assertTrue(llmCalls.contains("router/route#retry"), "应记录重试调用");
     }
@@ -568,7 +568,7 @@ class WorkflowScenarioTest {
     }
 
     // =====================================================================
-    // 活动创建全流程：C1 目标人群 → C2 模版和时间 → C3 确认后创建
+    // 活动创建全流程：统一收集 → 确认后创建
     // =====================================================================
 
     private static final String CONTINUE_ACTIVITY = "{\"action\":\"CONTINUE\",\"intent\":\"ACTIVITY_CREATE\",\"reason\":\"\"}";
@@ -576,19 +576,18 @@ class WorkflowScenarioTest {
     private void activityUntilTemplate(String sid) {
         routerScript.add("{\"action\":\"START\",\"intent\":\"ACTIVITY_CREATE\",\"reason\":\"\"}");
         extractScript.add("{\"ageMin\":60,\"gender\":\"FEMALE\",\"region\":\"阳光社区\"}");
-        extractScript.add("{}");
         var r1 = turn(sid, "帮我办个活动，面向阳光社区60岁以上的女性",
-                List.of("router", "collect_target", "choose_template"), "choose_template");
-        assertEquals("【流式回复】", r1.reply());
-        assertTrue(last(systemPrompts.get("ask")).contains("本轮前面步骤已保存、尚未向用户回复的信息：60 岁及以上、女性、阳光社区"));
+                List.of("router", "collect_target"), "collect_target");
+        assertTrue(r1.reply().contains("当前已记录：60 岁及以上、女性、阳光社区"));
+        assertTrue(r1.reply().contains("请补充：活动模版"));
     }
 
-    /** 走到确认这一步：先收齐目标人群，再补模版和时间，进入 C3 展示确认内容。 */
+    /** 走到确认这一步：先收齐目标人群，再补模版和时间，展示确认内容。 */
     private void activityUntilConfirm(String sid) {
         activityUntilTemplate(sid);
         routerScript.add(CONTINUE_ACTIVITY);
         extractScript.add("{\"template\":\"敬老关爱\",\"activityTime\":\"下周六上午\"}");
-        var r2 = turn(sid, "敬老关爱，下周六上午", List.of("router", "choose_template", "submit_activity"), "submit_activity");
+        var r2 = turn(sid, "敬老关爱，下周六上午", List.of("router", "collect_target", "submit_activity"), "submit_activity");
         assertTrue(r2.reply().startsWith("请确认以下信息："), r2.reply());
         assertFalse(r2.reply().contains("活动模版定为"), "只展示一次最终汇总");
         assertTrue(r2.reply().contains("请确认以下信息：\n- 目标人群：60 岁及以上、女性、阳光社区\n- 活动模版：敬老关爱\n- 活动时间：下周六上午"),
@@ -598,44 +597,136 @@ class WorkflowScenarioTest {
         assertTrue(task.getAwaiting() != null, "确认节点在等用户确认");
     }
 
-    /** 截图场景：C1 自动推进，C2 已有模版但缺时间，只发送 C2 的合并回复。 */
+    /** 一次提及的全部信息都能保存，追问不经过自由生成。 */
     @Test
-    void consecutiveCollectionStagesProduceOneReply() {
+    void unifiedCollectionProducesOneBoundedReply() {
         routerScript.add("{\"action\":\"START\",\"intent\":\"ACTIVITY_CREATE\"}");
-        extractScript.add("{\"ageMin\":20,\"gender\":\"MALE\",\"region\":\"阳光社区\"}");
-        extractScript.add("{\"template\":\"PARENT_CHILD\"}");
-        String expected = "已记录：阳光社区、20 岁及以上男性，活动类型为亲子活动。请问计划安排在什么时间？";
-        askReplyScript.add(expected);
+        extractScript.add("{\"ageMin\":20,\"gender\":\"MALE\",\"region\":\"阳光社区\",\"template\":\"PARENT_CHILD\"}");
         var result = turn("one-reply", "我要在阳光社区针对20岁以上的男生创建一个亲子活动",
-                List.of("router", "collect_target", "choose_template"), "choose_template");
-        // turn() 同时核对 SSE token 与最终回复；旧实现会在这里多出 C1 的固定确认。
-        assertEquals(expected, result.reply());
-        String prompt = last(systemPrompts.get("ask"));
-        assertTrue(prompt.contains("本轮前面步骤已保存、尚未向用户回复的信息：20 岁及以上、男性、阳光社区"));
-        assertTrue(prompt.contains("亲子活动"));
-        assertTrue(prompt.contains("还缺少：活动时间"));
+                List.of("router", "collect_target"), "collect_target");
+        assertEquals("当前已记录：20 岁及以上、男性、阳光社区；活动模版：亲子活动。\n请补充：活动时间。", result.reply());
         assertEquals("PARENT_CHILD", result.state().getTaskStack().get(0).getSlots().get("template"));
-        assertFalse(sessions.states.get("one-reply").contains("collectedStageInfo"), "暂存确认信息不能跨轮持久化");
-
+        assertFalse(sessions.states.get("one-reply").contains("collectedStageInfo"));
         routerScript.add(CONTINUE_ACTIVITY);
         extractScript.add("{}");
-        turn("one-reply", "我再想想", List.of("router", "choose_template"), "choose_template");
-        assertTrue(last(systemPrompts.get("ask")).contains("本轮前面步骤已保存、尚未向用户回复的信息：（无）"));
+        var again = turn("one-reply", "我再想想", List.of("router", "collect_target"), "collect_target");
+        assertEquals("请补充：活动时间。", again.reply());
+        assertFalse(llmCalls.stream().anyMatch(c -> c.contains("ask_missing")));
+    }
+
+    /** 本次截图：先说模版/时间/社区，再补年龄性别，应直接确认。 */
+    @Test
+    void earlyTemplateAndTimeAreSavedBeforeTargetIsComplete() {
+        routerScript.add("{\"action\":\"START\",\"intent\":\"ACTIVITY_CREATE\"}");
+        extractScript.add("{\"region\":\"阳光社区\",\"template\":\"PARENT_CHILD\",\"activityTime\":\"下周六上午\"}");
+        var first = turn("early-fields", "我想办亲子活动，下周六上午，地点在阳光社区。",
+                List.of("router", "collect_target"), "collect_target");
+        assertTrue(first.reply().endsWith("请补充：年龄范围、性别（可选：男性、女性、不限性别）。"), first.reply());
+        assertEquals("PARENT_CHILD", first.state().getTaskStack().get(0).getSlots().get("template"));
+        assertEquals("下周六上午", first.state().getTaskStack().get(0).getSlots().get("activityTime"));
+        routerScript.add(CONTINUE_ACTIVITY);
+        extractScript.add("{\"ageMin\":20,\"gender\":\"MALE\"}");
+        var second = turn("early-fields", "20岁以上的男性", List.of("router", "collect_target", "submit_activity"), "submit_activity");
+        assertTrue(second.reply().startsWith("请确认以下信息："));
+        assertTrue(second.reply().contains("亲子活动"));
+        assertTrue(second.reply().contains("下周六上午"));
+        assertFalse(second.reply().contains("人数"));
+        assertFalse(second.reply().contains("名称"));
+        assertFalse(second.reply().contains("几点"));
+        assertEquals(2, llmCalls.stream().filter(c -> c.endsWith("/extract_slots")).count());
+    }
+
+    @Test
+    void inventedFieldsAreIgnoredAndNeverConfirmed() {
+        routerScript.add("{\"action\":\"START\",\"intent\":\"ACTIVITY_CREATE\"}");
+        extractScript.add("{\"participantCount\":1000,\"activityName\":\"快乐周末\",\"template\":\"UNKNOWN\"}");
+        var result = turn("unknown-fields", "1000人，名称快乐周末", List.of("router", "collect_target"), "collect_target");
+        assertTrue(result.state().getTaskStack().get(0).getSlots().isEmpty());
+        assertFalse(result.reply().contains("1000"));
+        assertFalse(result.reply().contains("快乐周末"));
+        assertFalse(result.reply().contains("当前已记录"));
+        assertTrue(result.reply().contains("请重新提供：活动模版"));
+    }
+
+    @Test
+    void legacyTemplateStageResumesWithSameTaskAndSlots() {
+        activityUntilTemplate("legacy");
+        String taskId = sessions.find("legacy").orElseThrow().state().getTaskStack().get(0).getTaskId();
+        sessions.states.compute("legacy", (sid, json) -> json.replace("collect_target", "choose_template"));
+        routerScript.add(CONTINUE_ACTIVITY);
+        extractScript.add("{\"template\":\"PARENT_CHILD\",\"activityTime\":\"下周六上午\"}");
+        var result = turn("legacy", "亲子活动，下周六上午",
+                List.of("router", "choose_template", "collect_target", "submit_activity"), "submit_activity");
+        assertEquals(taskId, result.state().getTaskStack().get(0).getTaskId());
+        assertEquals("阳光社区", result.state().getTaskStack().get(0).getSlots().get("region"));
+        assertTrue(result.reply().contains("亲子活动"));
+    }
+
+    @Test
+    void legacyTemplateStageCanRequestEditWithoutNewValue() {
+        activityUntilTemplate("legacy-edit");
+        sessions.states.compute("legacy-edit", (sid, json) -> json.replace("collect_target", "choose_template"));
+        routerScript.add(editActivity("region"));
+        extractScript.add("{}");
+        var result = turn("legacy-edit", "修改区域", List.of("router", "collect_target"), "collect_target");
+        assertEquals(List.of("region"), result.state().getTaskStack().get(0).getEditingSlots());
+        assertEquals("请重新提供：目标区域或社区。", result.reply());
     }
 
     @Test
     void allSlotsInOneTurnOnlyEmitFinalConfirmation() {
         routerScript.add("{\"action\":\"START\",\"intent\":\"ACTIVITY_CREATE\"}");
-        extractScript.add("{\"ageMin\":20,\"gender\":\"MALE\",\"region\":\"阳光社区\"}");
-        extractScript.add("{\"template\":\"PARENT_CHILD\",\"activityTime\":\"下周六上午\"}");
+        extractScript.add("{\"ageMin\":20,\"gender\":\"MALE\",\"region\":\"阳光社区\",\"template\":\"PARENT_CHILD\",\"activityTime\":\"下周六上午\"}");
         var result = turn("all-slots", "在阳光社区给20岁以上男性办亲子活动，时间是下周六上午",
-                List.of("router", "collect_target", "choose_template", "submit_activity"), "submit_activity");
+                List.of("router", "collect_target", "submit_activity"), "submit_activity");
         assertTrue(result.reply().startsWith("请确认以下信息："), result.reply());
         assertTrue(result.reply().contains("20 岁及以上、男性、阳光社区"));
         assertTrue(result.reply().contains("亲子活动"));
         assertTrue(result.reply().contains("下周六上午"));
-        assertFalse(result.reply().contains("好的，"), "C1 和 C2 均不应发送中间确认");
+        assertFalse(result.reply().contains("好的，"), "收集节点不应发送中间确认");
         assertFalse(systemPrompts.containsKey("ask"), "信息收齐后不额外调用追问模型");
+    }
+
+    /** 框架仍支持多阶段任务：前面节点静默保存，后面只发一次基于真实数据的追问。 */
+    @Test
+    void multipleStagesCombineSavedInformationWithoutCallingAskModel() throws Exception {
+        nodes.set(nodes.indexOf(collectTarget), new CollectTargetNode(support) {
+            @Override protected List<SlotSpec> slots() {
+                return List.of(SlotSpec.string("region", "社区").build());
+            }
+            @Override protected String nextNode() { return "choose_template"; }
+        });
+        nodes.set(nodes.indexOf(chooseTemplate), new SlotFillingNode(support) {
+            @Override public String id() { return "choose_template"; }
+            @Override protected List<SlotSpec> slots() {
+                return List.of(SlotSpec.string("activityTime", "活动时间").build());
+            }
+            @Override protected String stageGoal() { return "收集活动时间"; }
+            @Override protected String nextNode() { return null; }
+        });
+        catalog.refresh();
+        rebuild();
+        routerScript.add("{\"action\":\"START\",\"intent\":\"ACTIVITY_CREATE\"}");
+        extractScript.add("{\"region\":\"阳光社区\"}");
+        extractScript.add("{}");
+        var first = turn("stages", "在阳光社区办活动",
+                List.of("router", "collect_target", "choose_template"), "choose_template");
+        assertEquals("当前已记录：阳光社区。\n请补充：活动时间。", first.reply());
+        assertFalse(sessions.states.get("stages").contains("collectedStageInfo"));
+        routerScript.add(CONTINUE_ACTIVITY);
+        extractScript.add("{}");
+        var second = turn("stages", "还没想好", List.of("router", "choose_template"), "choose_template");
+        assertEquals("请补充：活动时间。", second.reply());
+        assertFalse(llmCalls.stream().anyMatch(c -> c.contains("ask_missing")));
+    }
+
+    @Test
+    void emptyCollectionAsksAtMostTwoDeclaredGroups() {
+        routerScript.add("{\"action\":\"START\",\"intent\":\"ACTIVITY_CREATE\"}");
+        extractScript.add("{}");
+        var result = turn("two-questions", "帮我办活动", List.of("router", "collect_target"), "collect_target");
+        assertEquals("请补充：年龄范围、性别（可选：男性、女性、不限性别）。", result.reply());
+        assertEquals(result.reply(), result.state().getTaskStack().get(0).getAwaiting());
     }
 
     @Test
@@ -646,9 +737,9 @@ class WorkflowScenarioTest {
         catalog.refresh();
         rebuild();
         routerScript.add("{\"action\":\"START\",\"intent\":\"ACTIVITY_CREATE\"}");
-        extractScript.add("{\"ageMin\":20,\"gender\":\"MALE\",\"region\":\"阳光社区\"}");
-        var result = turn("terminal", "阳光社区20岁以上男性", List.of("router", "collect_target"), null);
-        assertEquals("好的，活动的目标人群确认为：20 岁及以上、男性、阳光社区。", result.reply());
+        extractScript.add("{\"ageMin\":20,\"gender\":\"MALE\",\"region\":\"阳光社区\",\"template\":\"PARENT_CHILD\",\"activityTime\":\"下周六上午\"}");
+        var result = turn("terminal", "阳光社区20岁以上男性，亲子活动，下周六上午", List.of("router", "collect_target"), null);
+        assertEquals("好的，已记录：20 岁及以上、男性、阳光社区；活动模版：亲子活动；活动时间：下周六上午。", result.reply());
     }
 
     private static String editActivity(String... fields) {
@@ -668,7 +759,7 @@ class WorkflowScenarioTest {
         TaskFrame waiting = ask.state().getTaskStack().get(0);
         assertEquals("阳光社区", waiting.getSlots().get("region"), "未提供新值时保留旧区域");
         assertEquals(List.of("region"), waiting.getEditingSlots());
-        assertTrue(last(systemPrompts.get("ask")).contains("用户要求修改但尚未收到有效新内容：目标区域或社区"));
+        assertEquals("请重新提供：目标区域或社区。", ask.reply());
         assertTrue(last(routerInputs).contains("region（目标区域或社区）"));
         assertFalse(last(routerInputs).contains("ageUnlimited（"), "辅助抽取字段不能作为待修改槽位");
 
@@ -678,16 +769,13 @@ class WorkflowScenarioTest {
 
         routerScript.add(CONTINUE_ACTIVITY);
         extractScript.add("{\"region\":\"杭州市西湖区\"}");
-        extractScript.add("{}");
         var changed = turn("edit-region", "杭州市西湖区",
-                List.of("router", "collect_target", "choose_template"), "choose_template");
+                List.of("router", "collect_target"), "collect_target");
         TaskFrame saved = sessions.find("edit-region").orElseThrow().state().getTaskStack().get(0);
         assertEquals(Map.of("ageMin", 60, "gender", "FEMALE", "region", "杭州市西湖区"), saved.getSlots());
         assertEquals(taskId, saved.getTaskId(), "修改原任务，不创建新任务");
         assertTrue(saved.getEditingSlots().isEmpty());
-        assertEquals("【流式回复】", changed.reply());
-        String prompt = last(systemPrompts.get("ask"));
-        assertTrue(prompt.contains("本轮前面步骤已保存、尚未向用户回复的信息：60 岁及以上、女性、杭州市西湖区"));
+        assertTrue(changed.reply().contains("当前已记录：60 岁及以上、女性、杭州市西湖区"));
     }
 
     @Test
@@ -698,8 +786,7 @@ class WorkflowScenarioTest {
         assertFalse(sessions.states.get("edit-direct").contains("editingSlots"));
         routerScript.add(editActivity("region"));
         extractScript.add("{\"region\":\"杭州市西湖区\"}");
-        extractScript.add("{}");
-        turn("edit-direct", "区域改成杭州市西湖区", List.of("router", "collect_target", "choose_template"), "choose_template");
+        turn("edit-direct", "区域改成杭州市西湖区", List.of("router", "collect_target"), "collect_target");
         assertEquals("杭州市西湖区", sessions.find("edit-direct").orElseThrow().state().getTaskStack().get(0).getSlots().get("region"));
     }
 
@@ -724,8 +811,7 @@ class WorkflowScenarioTest {
         // 用户重新确认原值，也算提供了有效内容，不能无限追问。
         routerScript.add(CONTINUE_ACTIVITY);
         extractScript.add("{\"region\":\"阳光社区\"}");
-        extractScript.add("{}");
-        var same = turn("edit-invalid", "还是阳光社区吧", List.of("router", "collect_target", "choose_template"), "choose_template");
+        var same = turn("edit-invalid", "还是阳光社区吧", List.of("router", "collect_target"), "collect_target");
         assertTrue(same.state().getTaskStack().get(0).getEditingSlots().isEmpty());
     }
 
@@ -733,10 +819,9 @@ class WorkflowScenarioTest {
     void editsAcrossStagesUseTheirOwnValidationAndReconfirmBeforeCommit() {
         activityUntilConfirm("edit-multi");
         routerScript.add(editActivity("region", "activityTime"));
-        extractScript.add("{\"region\":\"杭州市西湖区\"}");
-        extractScript.add("{\"activityTime\":\"下周日上午\"}");
+        extractScript.add("{\"region\":\"杭州市西湖区\",\"activityTime\":\"下周日上午\"}");
         var changed = turn("edit-multi", "区域改到杭州市西湖区，时间改成下周日上午",
-                List.of("router", "collect_target", "choose_template", "submit_activity"), "submit_activity");
+                List.of("router", "collect_target", "submit_activity"), "submit_activity");
         TaskFrame task = sessions.find("edit-multi").orElseThrow().state().getTaskStack().get(0);
         assertEquals("杭州市西湖区", task.getSlots().get("region"));
         assertEquals("下周日上午", task.getSlots().get("activityTime"));
@@ -751,7 +836,7 @@ class WorkflowScenarioTest {
         activityUntilTemplate("edit-unknown");
         routerScript.add(editActivity("submit_activity", "phone", "ageUnlimited"));
         extractScript.add("{}");
-        var result = turn("edit-unknown", "修改信息", List.of("router", "choose_template"), "choose_template");
+        var result = turn("edit-unknown", "修改信息", List.of("router", "collect_target"), "collect_target");
         assertTrue(result.state().getTaskStack().get(0).getEditingSlots().isEmpty());
         assertEquals("阳光社区", result.state().getTaskStack().get(0).getSlots().get("region"));
     }
@@ -767,8 +852,7 @@ class WorkflowScenarioTest {
 
         routerScript.add(CONTINUE_ACTIVITY);
         extractScript.add("{\"ageMin\":70}");
-        extractScript.add("{}");
-        var changed = turn("edit-age", "70岁以上", List.of("router", "collect_target", "choose_template"), "choose_template");
+        var changed = turn("edit-age", "70岁以上", List.of("router", "collect_target"), "collect_target");
         TaskFrame task = changed.state().getTaskStack().get(0);
         assertEquals(70, task.getSlots().get("ageMin"));
         assertFalse(task.getSlots().containsKey("ageMax"));
@@ -793,14 +877,13 @@ class WorkflowScenarioTest {
 
         routerScript.add(CONTINUE_ACTIVITY);
         confirmScript.add("{\"decision\":\"MODIFY\",\"reason\":\"改性别\"}");
-        extractScript.add("{\"gender\":\"MALE\"}");   // 回到 C1，抽到修改
-        extractScript.add("{}");                      // C2 没有变化，直接往后走
+        extractScript.add("{\"gender\":\"MALE\"}");   // 回到统一收集节点，抽到修改
         var r = turn("f2", "性别改成男性",
-                List.of("router", "submit_activity", "collect_target", "choose_template", "submit_activity"), "submit_activity");
+                List.of("router", "submit_activity", "collect_target", "submit_activity"), "submit_activity");
         assertTrue(r.reply().startsWith("请确认以下信息："), r.reply());
         assertFalse(r.reply().contains("目标人群确认为"), "修改后只展示最终确认，不逐阶段播报");
         assertTrue(r.reply().contains("- 目标人群：60 岁及以上、男性、阳光社区"), "重新展示修改后的确认内容: " + r.reply());
-        assertFalse(r.reply().contains("活动模版定为"), "C2 没有变化，不重复确认: " + r.reply());
+        assertFalse(r.reply().contains("活动模版定为"), "不重复确认: " + r.reply());
 
         routerScript.add(CONTINUE_ACTIVITY);
         var done = turn("f2", "好的", List.of("router", "submit_activity"), null);
@@ -849,7 +932,7 @@ class WorkflowScenarioTest {
         List<String> keys = new ArrayList<>();
         AtomicInteger calls = new AtomicInteger();
         int idx = nodes.indexOf(nodes.stream().filter(n -> n.id().equals("submit_activity")).findFirst().orElseThrow());
-        nodes.set(idx, new SubmitActivityNode(support, collectTarget, chooseTemplate) {
+        nodes.set(idx, new SubmitActivityNode(support, collectTarget) {
             @Override
             protected CommitResult commit(TaskFrame task, String idempotencyKey) {
                 keys.add(idempotencyKey);
@@ -993,12 +1076,6 @@ class WorkflowScenarioTest {
                     String text = "查询结果：" + String.join("；", results) + finalSuffix;
                     handler.onPartialResponse(text);
                     handler.onCompleteResponse(ChatResponse.builder().aiMessage(AiMessage.from(text)).build());
-                    return;
-                }
-                if (who.equals("ask") && !askReplyScript.isEmpty()) {
-                    String reply = askReplyScript.pop();
-                    handler.onPartialResponse(reply);
-                    handler.onCompleteResponse(ChatResponse.builder().aiMessage(AiMessage.from(reply)).build());
                     return;
                 }
                 handler.onPartialResponse("【流式");
