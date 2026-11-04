@@ -22,12 +22,12 @@ spring:
 
 flow:
   langfuse:
-    enabled: ${LANGFUSE_ENABLED:false}
+    enabled: ${LANGFUSE_ENABLED:true}
     base-url: ${LANGFUSE_BASE_URL:}
     public-key: ${LANGFUSE_PUBLIC_KEY:}
     secret-key: ${LANGFUSE_SECRET_KEY:}
     # 默认只发送模型、用量、耗时和层级；开启后才发送经脱敏的正文。
-    capture-content: ${LANGFUSE_CAPTURE_CONTENT:false}
+    capture-content: ${LANGFUSE_CAPTURE_CONTENT:true}
     environment: ${LANGFUSE_TRACING_ENVIRONMENT:development}
     release: ${LANGFUSE_RELEASE:}
     sample-rate: ${LANGFUSE_SAMPLE_RATE:1.0}

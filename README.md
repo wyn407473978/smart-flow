@@ -9,6 +9,8 @@ Spring Boot 3.5 + LangChain4j 1.19 + LangGraph4j 1.8（LTS）+ MyBatis 3 + Postg
 
 **理解架构与对话流转：见 [架构文档](docs/architecture.md)**（模块职责、状态设计、执行流程、追问与插话、完整对话示例及源码阅读顺序）。
 
+**边读源码边学习：见 [源码学习导读](docs/source-learning-guide.md)**（从类加载与 Bean 注册讲起，逐步跟完节点组装、一轮执行、任务状态、模型工具与数据库；附源码链接、设计取舍和断点练习）。
+
 ## 模块
 
 | 模块 | 内容 | 业务工程是否依赖 |
