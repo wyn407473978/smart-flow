@@ -26,17 +26,32 @@ public class ActivityTemplateNode extends ActivityCollectionNode {
     @Override protected String label() { return "短信模版推荐与选择"; }
     @Override public Map<String, String> promptPreview() { return Map.of("recommend_templates · system", RECOMMEND_PROMPT); }
     @Override protected String question(TaskFrame task) {
+        if (ActivityData.candidates(task.getSlots()).size() != 3)
+            return "请提供短信内容或使用场景，例如健康讲座通知；我会推荐三个模版供你选择。";
+        return "请回复1、2或3选择一个短信模版，也可以换个使用场景。";
+    }
+    @Override protected String askItem(TaskFrame task) {
+        return ActivityData.candidates(task.getSlots()).size() == 3
+                ? "从系统列出的三个短信模版里选一条（回复1、2或3），或者换个短信场景"
+                : "短信内容或使用场景（例如健康讲座通知），用来推荐三个短信模版";
+    }
+    @Override protected String describeSaved(TaskFrame task) {
         List<String> choices = ActivityData.candidates(task.getSlots());
-        if (choices.size() != 3) return "请提供短信内容或使用场景，例如健康讲座通知；我会推荐三个模版供你选择。";
-        return "请选择一个短信模版（回复1、2或3，也可以换个使用场景）：\n1. " + choices.get(0)
-                + "\n2. " + choices.get(1) + "\n3. " + choices.get(2);
+        int index = choices.indexOf(task.getSlots().get("smsContent"));
+        return index < 0 ? null : "短信内容：第" + (index + 1) + "条模版";
+    }
+    /** 候选模版原文，由代码列出；模型不复述也不改写 */
+    static String listCandidates(List<String> choices) {
+        StringBuilder text = new StringBuilder();
+        for (int i = 0; i < choices.size(); i++) text.append("\n").append(i + 1).append(". ").append(choices.get(i));
+        return text.toString();
     }
 
     @Override protected String collect(TaskFrame task, ActivityInput input, NodeScope scope) {
         Map<String, Object> slots = task.getSlots();
         if (input.templateBrief() != null) {
             String brief = input.templateBrief().strip();
-            if (brief.isEmpty() || brief.length() > 1000) return "请提供1到1000字的短信内容或使用场景。";
+            if (brief.isEmpty() || brief.length() > 1000) return "短信内容或使用场景需要在1到1000字之间";
             // 更换场景立即撤销旧选择，生成失败也不能误用旧短信提交。
             slots.remove("smsContent"); slots.remove("templateCandidates");
             slots.put("templateBrief", brief);
@@ -46,18 +61,19 @@ public class ActivityTemplateNode extends ActivityCollectionNode {
                 List<String> templates = result == null || result.templates() == null ? List.of() : result.templates();
                 if (templates.size() != 3 || templates.stream().anyMatch(t -> t == null || t.isBlank() || t.length() > 300)
                         || new HashSet<>(templates).size() != 3)
-                    return "暂时没能生成三个有效模版，请重新提供短信内容或场景。";
+                    return "暂时没能生成三个有效模版，可以换个说法再描述一下短信内容或场景";
                 slots.put("templateCandidates", new ArrayList<>(templates));
                 // 同一句即使带“选1”，也是针对旧候选；新候选必须展示后另行选择。
                 return null;
             } catch (LlmJsonException e) {
-                return "短信模版推荐暂时失败，请重新提供场景重试。";
+                return "短信模版推荐暂时失败，可以再描述一次短信场景重试";
             }
         }
         if (input.templateChoice() != null) {
             List<String> choices = ActivityData.candidates(slots);
             int choice = input.templateChoice();
-            if (choices.size() != 3 || choice < 1 || choice > 3) return "请从已展示的三个短信模版中选择1、2或3。";
+            if (choices.size() != 3) return "还没有可选的短信模版，需要先说一下短信内容或使用场景";
+            if (choice < 1 || choice > 3) return "只有三个短信模版，请选择1、2或3";
             slots.put("smsContent", choices.get(choice - 1));
         }
         return null;

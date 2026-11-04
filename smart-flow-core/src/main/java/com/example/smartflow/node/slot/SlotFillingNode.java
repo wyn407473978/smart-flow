@@ -1,9 +1,7 @@
 package com.example.smartflow.node.slot;
 
-import com.example.smartflow.config.FlowProperties;
 import com.example.smartflow.flow.FlowState;
 import com.example.smartflow.flow.TaskFrame;
-import com.example.smartflow.llm.NodeModelClient;
 import com.example.smartflow.node.AbstractNode;
 import com.example.smartflow.node.HistoryPolicy;
 import com.example.smartflow.node.NodeScope;
@@ -13,9 +11,7 @@ import com.example.smartflow.node.TaskStackEdit;
 import com.example.smartflow.node.slot.Slots.MergeResult;
 import dev.langchain4j.data.message.ChatMessage;
 import dev.langchain4j.data.message.UserMessage;
-import dev.langchain4j.model.chat.request.ChatRequest;
 
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -67,28 +63,6 @@ public abstract class SlotFillingNode extends AbstractNode {
 
             只输出 JSON，格式：
             %s
-            """;
-
-    /** 追问模块的系统提示词。只给它"问什么"，不给已收集的信息，从源头上避免它确认没保存的内容 */
-    private static final String ASK_PROMPT = """
-            你是%s，%s。你现在是追问模块。%s
-            当前步骤：%s。
-            用户已提供的信息和校验提示，系统已经单独告诉用户了。你只负责接着写一到两句话，向用户追问。
-
-            本轮要问：%s
-            之后还要了解：%s
-            %s
-            规则：
-            1. 只问"本轮要问"里的内容；可以顺带提一句之后还要了解哪些，但不要展开问。
-            2. 不要复述、确认或总结用户已提供的信息，不要说"好的""已记录""收到"，不要编造选项、信息或承诺。
-            3. 用户这句话没给出有效信息时（例如"我再想想""随便""你推荐一个"），先简短回应他，再追问；推荐只能从可选项里选。
-            4. 需要用户重新提供时，直接请他重新说，不要重复系统已经说过的原因。
-            5. 不要使用 Markdown，不要提到"槽位""字段""节点"这类技术词。
-            """;
-
-    private static final String ASK_USER = """
-            助手上一句话：%s
-            用户本轮消息：%s
             """;
 
     protected SlotFillingNode(NodeSupport support) {
@@ -202,11 +176,8 @@ public abstract class SlotFillingNode extends AbstractNode {
     public Map<String, String> promptPreview() {
         Map<String, String> prompts = new LinkedHashMap<>();
         prompts.put("extract_slots · system", extractPrompt());
-        prompts.put("ask_missing · system", ASK_PROMPT.formatted(
-                support.assistant().name(), support.assistant().persona(), contextLine().strip(), stageGoal(),
-                "{本轮要问的信息，最多两项，带可选值}", "{之后还要了解的信息，没有则为（无）}",
-                "{需要重新提供时的原因；同一问题连问两次时提示换说法；都没有则为空}\n"));
-        prompts.put("ask_missing · user", ASK_USER.formatted("{助手上一句话}", "{用户本轮消息}"));
+        prompts.put("ask_missing · system", FollowUp.previewSystem(support.assistant(), contextLine(), stageGoal()));
+        prompts.put("ask_missing · user", FollowUp.previewUser());
         prompts.put("ask_missing · 说明", "已记录信息和校验提示由代码先输出；追问计划由代码决定，模型只负责措辞。"
                 + "当前方式：" + askMode() + "（CODE 或模型超时、出错时使用代码文案，例如\"请补充：年龄范围、性别。\"）");
         return prompts;
@@ -272,7 +243,7 @@ public abstract class SlotFillingNode extends AbstractNode {
 
     @SuppressWarnings("unchecked")
     private Map<String, Object> extract(FlowState state, NodeScope scope, TaskFrame task) {
-        String lastAssistant = lastAssistant(state);
+        String lastAssistant = lastAssistantMessage(state);
         String user = """
                 已收集信息：%s
                 用户要求修改、等待新值的字段：%s
@@ -331,44 +302,8 @@ public abstract class SlotFillingNode extends AbstractNode {
         if (!facts.isEmpty()) {
             appendText(scope, text, String.join("\n", facts));
         }
-        if (askMode() == AskMode.MODEL && !asking.isEmpty()) {
-            FlowProperties.SlotFilling cfg = support.props().slotFilling();
-            ChatRequest request = ChatRequest.builder()
-                    .messages(List.of(
-                            system(askPrompt(asking, later, correcting, result.errors().messages(), repeated)),
-                            UserMessage.from(ASK_USER.formatted(lastAssistant(state), state.userInput()))))
-                    .maxOutputTokens(cfg.maxOutputTokens())
-                    .build();
-            NodeModelClient.GuardedStream outcome = streamGuarded(scope, "ask_missing", support.models().ask(),
-                    request, text, Duration.ofMillis(cfg.firstTokenTimeoutMs()));
-            if (outcome == NodeModelClient.GuardedStream.COMPLETED) {
-                return text.toString();
-            }
-            log.warn("追问模型未完成输出（{}），改用代码追问 node={}", outcome, id());
-        }
-        appendText(scope, text, codeQuestion);
-        return text.toString();
-    }
-
-    /** 追问方式。默认取配置 flow.slot-filling.ask-mode，个别节点需要不同方式时覆盖 */
-    protected AskMode askMode() {
-        return support.props().slotFilling().askMode();
-    }
-
-    private String askPrompt(List<String> asking, List<String> later, boolean correcting,
-                             List<String> errors, boolean repeated) {
-        String correctionLine = !correcting ? ""
-                : errors.isEmpty() ? "这些信息需要用户重新提供（用户要求修改，或者刚才给的内容不符合要求）。\n"
-                : "这些信息需要用户重新提供，原因（系统已经告诉用户）：" + String.join("；", errors) + "。\n";
-        String repeatedLine = repeated ? "同样的问题上一轮已经问过，这次换一种说法，可以把可选项列出来方便用户直接选。\n" : "";
-        return ASK_PROMPT.formatted(support.assistant().name(), support.assistant().persona(),
-                contextLine().strip(), stageGoal(),
-                String.join("、", Slots.missingWithHints(slots(), asking)),
-                later.isEmpty() ? "（无）" : String.join("、", later),
-                correctionLine + repeatedLine);
-    }
-
-    private static String lastAssistant(FlowState state) {
-        return state.history().isEmpty() ? "（无）" : state.history().get(state.history().size() - 1).content();
+        FollowUp.Plan plan = new FollowUp.Plan(stageGoal(), contextLine(),
+                Slots.missingWithHints(slots(), asking), later, result.errors().messages(), correcting, repeated, List.of());
+        return askFollowUp(state, scope, plan, text, codeQuestion);
     }
 }

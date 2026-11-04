@@ -31,7 +31,7 @@ core 和 web 都是 Spring Boot 自动配置（`FlowCoreAutoConfiguration`、`Fl
 | A 路由 | `router` | ROUTER | 每轮必经。提示词由子节点的路由声明自动拼成；模型判断 action + intent + 待修改字段，去向和任务栈变化由代码决定 |
 | B2 业务查询 | `biz_query` | TOOL_AGENT | 挂载 `get_weather`（查天气，演示数据）、`get_user_info`（查本人信息：rise / 27 岁）；手写 tool loop，流式输出 |
 | B3 闲聊 | `chat` | CHAT | 流式回复；根路由的兜底节点 |
-| 短信活动路由 | `ACTIVITY_CREATE` | ROUTER | 根据用户输入分发区域、人群、时间、短信模版；四项收齐才确认提交 |
+| 短信活动路由 | `ACTIVITY_CREATE` | ROUTER | 根据用户输入分发区域、人群、时间、短信模版；没收齐时由代码决定问哪几项、模型措辞追问；四项收齐才确认提交 |
 | 区域收集 | `activity_region` | SLOT_FILLING | 保留用户提供的短信发送区域 |
 | 人群确认 | `activity_audience` | SLOT_FILLING | 全部人群、性别、年龄或组合条件 |
 | 时间收集 | `activity_time` | SLOT_FILLING | 相对时间转换为北京时间 `yyyy-MM-dd HH:mm:ss`，严格校验晚于当前时间 |
@@ -285,7 +285,7 @@ mvn test
 - `FrameworkResourcesTest`（core）：Mapper XML、自动配置注册文件、建表脚本都打进了 jar
 - `FlowPropertiesBindingTest`（core）：配置 record 都能被 Spring Boot 绑定
 - `SlotsTest`、`TaskStackEditTest`、`ConfirmNodeTest`（core）：槽位转换 / 校验 / 合并、任务栈操作、确认词判定
-- `ActivityWorkflowTest`（demo）：短信活动全部24种收集顺序、同句多参数、三模版选择、未来时间和过期复验、修改后确认、插话、取消、mock失败重试与幂等
+- `ActivityWorkflowTest`（demo）：短信活动全部24种收集顺序、同句多参数、三模版选择、未来时间和过期复验、修改后确认、插话、取消、mock失败重试与幂等、当轮展示新推荐模版、模型追问与兜底
 - `CollectTargetNodeTest`（demo）：旧工作流测试夹具的槽位规则回归（年龄不限、范围替换、下限不能大于上限）
 - `WorkflowScenarioTest`（demo）：基于旧版顺序任务夹具的框架多轮回归测试，用按脚本返回的 stub 模型 + 内存存储，不需要数据库和真实模型。
   覆盖开始任务、补充、插话、非法 JSON 重试、统一收集→确认同轮流转、提前提供模版和时间、禁止额外字段追问、旧会话兼容、确认后创建、确认前修改、写操作失败重试、取消、路由兜底

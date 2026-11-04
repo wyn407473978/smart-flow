@@ -1,5 +1,6 @@
 package com.example.smartflow.node;
 
+import com.example.smartflow.config.FlowProperties;
 import com.example.smartflow.engine.TurnContext;
 import com.example.smartflow.engine.TurnEvent;
 import com.example.smartflow.flow.FlowNames;
@@ -8,10 +9,13 @@ import com.example.smartflow.flow.HistoryMessage;
 import com.example.smartflow.flow.TaskFrame;
 import com.example.smartflow.llm.NodeModelClient;
 import com.example.smartflow.node.route.RouteSpec;
+import com.example.smartflow.node.slot.AskMode;
+import com.example.smartflow.node.slot.FollowUp;
 import com.example.smartflow.tool.FlowTool;
 import com.example.smartflow.tool.ToolDescriptions;
 import dev.langchain4j.data.message.ChatMessage;
 import dev.langchain4j.data.message.SystemMessage;
+import dev.langchain4j.data.message.UserMessage;
 import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.chat.ChatRequestOptions;
 import dev.langchain4j.model.chat.StreamingChatModel;
@@ -179,6 +183,48 @@ public abstract class AbstractNode implements NodeAction<FlowState> {
      */
     protected String streamReply(NodeScope scope, String purpose, List<ChatMessage> messages) throws Exception {
         return support.modelClient().streamReply(scope, messages, traceOptions(scope, purpose, true, null));
+    }
+
+    /** 收集信息时的追问方式。默认取配置 flow.slot-filling.ask-mode，个别节点需要不同方式时覆盖 */
+    protected AskMode askMode() {
+        return support.props().slotFilling().askMode();
+    }
+
+    /**
+     * 按代码给出的追问计划追问，接在 text 已有内容（通常是代码先输出的"已记录……"和校验提示）后面。
+     * {@link AskMode#MODEL} 下由追问模型措辞并流式输出；{@link AskMode#CODE}、计划里没有要问的项，
+     * 或模型超时、出错、没有输出时，改用 codeQuestion。返回整段回复。
+     */
+    protected String askFollowUp(FlowState state, NodeScope scope, FollowUp.Plan plan, StringBuilder text,
+                                 String codeQuestion) {
+        if (askMode() == AskMode.MODEL && !plan.asking().isEmpty()) {
+            FlowProperties.SlotFilling cfg = support.props().slotFilling();
+            ChatRequest request = ChatRequest.builder()
+                    .messages(List.of(
+                            system(FollowUp.systemPrompt(support.assistant(), plan)),
+                            UserMessage.from(FollowUp.userPrompt(lastAssistantMessage(state), state.userInput()))))
+                    .maxOutputTokens(cfg.maxOutputTokens())
+                    .build();
+            NodeModelClient.GuardedStream outcome = streamGuarded(scope, "ask_missing", support.models().ask(),
+                    request, text, Duration.ofMillis(cfg.firstTokenTimeoutMs()));
+            if (outcome == NodeModelClient.GuardedStream.COMPLETED) {
+                return text.toString();
+            }
+            log.warn("追问模型未完成输出（{}），改用代码追问 node={}", outcome, id());
+        }
+        appendText(scope, text, codeQuestion);
+        return text.toString();
+    }
+
+    /** 助手上一句话；没有历史时为"（无）" */
+    protected static String lastAssistantMessage(FlowState state) {
+        for (int i = state.history().size() - 1; i >= 0; i--) {
+            HistoryMessage message = state.history().get(i);
+            if (HistoryMessage.ASSISTANT.equals(message.role())) {
+                return message.content();
+            }
+        }
+        return "（无）";
     }
 
     /**

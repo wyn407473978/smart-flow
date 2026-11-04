@@ -13,10 +13,14 @@ public class ActivityRegionNode extends ActivityCollectionNode {
     @Override public String section() { return "region"; }
     @Override protected String label() { return "短信发送区域"; }
     @Override protected String question(TaskFrame task) { return "短信要发到哪个区域？例如：杭州市西湖区蒋村街道。"; }
+    @Override protected String askItem(TaskFrame task) { return "发送区域（例如：杭州市西湖区蒋村街道）"; }
+    @Override protected String describeSaved(TaskFrame task) {
+        return task.getSlots().get("region") instanceof String r && !r.isBlank() ? "发送区域：" + r : null;
+    }
     @Override protected String collect(TaskFrame task, ActivityInput input, NodeScope scope) {
         if (input.region() == null) return null;
         String region = input.region().strip();
-        if (region.isEmpty() || region.length() > 100) return "请提供有效的发送区域（不超过100字）。";
+        if (region.isEmpty() || region.length() > 100) return "发送区域需要是1到100字的地名";
         task.getSlots().put("region", region);
         return null;
     }

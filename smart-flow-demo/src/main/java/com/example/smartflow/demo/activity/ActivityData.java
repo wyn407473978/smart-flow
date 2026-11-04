@@ -17,6 +17,30 @@ public final class ActivityData {
     public static final DateTimeFormatter TIME_FORMAT = DateTimeFormatter.ofPattern("uuuu-MM-dd HH:mm:ss")
             .withResolverStyle(ResolverStyle.STRICT);
 
+    /** 严格解析 yyyy-MM-dd HH:mm:ss；格式不对或日期不存在返回 null */
+    public static LocalDateTime parse(Object value) {
+        if (!(value instanceof String text) || !text.matches("\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}")) return null;
+        try {
+            return LocalDateTime.parse(text, TIME_FORMAT);
+        } catch (java.time.DateTimeException e) {
+            return null;
+        }
+    }
+
+    /** 给用户看的时间，例如 2026-11-05 09:00 */
+    public static String display(Object value) {
+        LocalDateTime time = parse(value);
+        return time == null ? String.valueOf(value) : time.format(DISPLAY_FORMAT);
+    }
+
+    public static final DateTimeFormatter DISPLAY_FORMAT = DateTimeFormatter.ofPattern("uuuu-MM-dd HH:mm");
+
+    /** 把多条提示连成一句：去掉各自的句末标点，用分号连接，末尾加句号 */
+    public static String sentence(java.util.Collection<String> parts) {
+        return parts.stream().map(p -> p.strip().replaceAll("[。．.！!？?；;，,]+$", ""))
+                .filter(p -> !p.isEmpty()).collect(java.util.stream.Collectors.joining("；")) + "。";
+    }
+
     public static boolean future(Object value, Clock clock) {
         if (!(value instanceof String text)) return false;
         try {
